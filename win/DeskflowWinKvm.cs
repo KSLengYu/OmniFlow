@@ -204,16 +204,31 @@ public sealed partial class DeskflowService
     private WireMonitorDto? FindMonitorForPoint(int px, int py)
     {
         if (_localMonitors.Count == 0) _localMonitors = DeskflowTransport.EnumerateRealWindowsMonitors();
-        var lm = _localMonitors.FirstOrDefault(m =>
-            px >= m.BoundsX - 6 && px <= m.BoundsX + m.WidthPx + 6 &&
-            py >= m.BoundsY - 6 && py <= m.BoundsY + m.HeightPx + 6);
-        return lm ?? (_localMonitors.Count > 0 ? _localMonitors[0] : null);
+        for (int i = 0; i < _localMonitors.Count; i++)
+        {
+            var m = _localMonitors[i];
+            if (px >= m.BoundsX - 6 && px <= m.BoundsX + m.WidthPx + 6 &&
+                py >= m.BoundsY - 6 && py <= m.BoundsY + m.HeightPx + 6)
+            {
+                return m;
+            }
+        }
+        return _localMonitors.Count > 0 ? _localMonitors[0] : null;
     }
 
     private (int centerX, int centerY) GetPrimaryCursorCenter()
     {
         if (_localMonitors.Count == 0) _localMonitors = DeskflowTransport.EnumerateRealWindowsMonitors();
-        var primary = _localMonitors.FirstOrDefault(m => m.IsPrimary) ?? (_localMonitors.Count > 0 ? _localMonitors[0] : null);
+        WireMonitorDto? primary = null;
+        for (int i = 0; i < _localMonitors.Count; i++)
+        {
+            if (_localMonitors[i].IsPrimary)
+            {
+                primary = _localMonitors[i];
+                break;
+            }
+        }
+        primary ??= _localMonitors.Count > 0 ? _localMonitors[0] : null;
         if (primary != null && primary.WidthPx > 0 && primary.HeightPx > 0)
         {
             return (primary.BoundsX + (primary.WidthPx >> 1), primary.BoundsY + (primary.HeightPx >> 1));
@@ -225,8 +240,18 @@ public sealed partial class DeskflowService
 
     private (double refW, double refH) GetActiveMacRefSize()
     {
-        var activeMac = Monitors.FirstOrDefault(m => m.OsKind == "macOS" && Math.Max(0, m.DisplayIndex - 1) == _remoteMacMonIdx)
-                        ?? Monitors.FirstOrDefault(m => m.OsKind == "macOS");
+        IndependentMonitorItem? activeMac = null;
+        for (int i = 0; i < Monitors.Count; i++)
+        {
+            var m = Monitors[i];
+            if (m.OsKind != "macOS") continue;
+            activeMac ??= m;
+            if (Math.Max(0, m.DisplayIndex - 1) == _remoteMacMonIdx)
+            {
+                activeMac = m;
+                break;
+            }
+        }
         double refW = activeMac != null ? Math.Max(1280.0, activeMac.WidthPx / Math.Max(1.0, activeMac.ScaleFactor)) : 1728.0;
         double refH = activeMac != null ? Math.Max(720.0, activeMac.HeightPx / Math.Max(1.0, activeMac.ScaleFactor)) : 1117.0;
         return (refW, refH);
@@ -536,454 +561,6 @@ public sealed partial class DeskflowService
     private int _prevLocalX = 0;
     private int _prevLocalY = 0;
 
-    internal static class WinKvmStageTracer
-    {
-        private static readonly object _qLock = new();
-        private static readonly Queue<string> _pending = new();
-        private static bool _draining = false;
-        private static long _seq = 0;
-
-        public static long BeginCrossing(long nowTicks)
-        {
-            return Interlocked.Increment(ref _seq);
-        }
-
-        public static void Log(long seq, long t0Ticks, string detail, long? nowTicks = null, string? customLogPath = null, bool sync = false)
-        {
-            if (seq <= 0 || t0Ticks <= 0) return;
-            long now = nowTicks ?? Stopwatch.GetTimestamp();
-            double deltaMs = now >= t0Ticks ? (now - t0Ticks) * 1000.0 / Stopwatch.Frequency : 0.0;
-            string line = $"[{DateTime.Now:HH:mm:ss.fff}] [KVM-Stage-Win seq=#{seq} +{deltaMs:F2}ms] {detail}{Environment.NewLine}";
-            if (sync)
-            {
-                AppendLines(customLogPath ?? OmniFlowPaths.RuntimeLogPath, new[] { line });
-                return;
-            }
-            bool kick = false;
-            lock (_qLock)
-            {
-                _pending.Enqueue(line);
-                if (!_draining)
-                {
-                    _draining = true;
-                    kick = true;
-                }
-            }
-            if (kick)
-            {
-                ThreadPool.QueueUserWorkItem(_ => Drain(customLogPath ?? OmniFlowPaths.RuntimeLogPath));
-            }
-        }
-
-        private static void Drain(string path)
-        {
-            while (true)
-            {
-                List<string> batch;
-                lock (_qLock)
-                {
-                    if (_pending.Count == 0)
-                    {
-                        _draining = false;
-                        return;
-                    }
-                    batch = new List<string>(_pending.Count);
-                    while (_pending.Count > 0) batch.Add(_pending.Dequeue());
-                }
-                AppendLines(path, batch);
-            }
-        }
-
-        private static void AppendLines(string path, IEnumerable<string> lines)
-        {
-            try
-            {
-                string? dir = Path.GetDirectoryName(path);
-                if (!string.IsNullOrEmpty(dir)) Directory.CreateDirectory(dir);
-                using var fs = new FileStream(path, FileMode.Append, FileAccess.Write, FileShare.ReadWrite);
-                using var sw = new StreamWriter(fs, System.Text.Encoding.UTF8);
-                foreach (var l in lines) sw.Write(l);
-            }
-            catch { }
-        }
-    }
-
-    internal sealed class WinCursorTransitionTracker
-    {
-        private struct RawPacket
-        {
-            public int Dx;
-            public int Dy;
-            public uint MsgTimeMs;
-            public long QpcTicks;
-            public bool Consumed;
-        }
-
-        private readonly object _lock = new();
-        private readonly RawPacket[] _localRing = new RawPacket[16];
-        private int _ringWriteIdx;
-
-        private bool _isRemote;
-        private int _anchorX = -1;
-        private int _anchorY = -1;
-        private bool _waitingHookAnchor;
-        private bool _awaitingPostCrossRaw;
-        private uint _crossTimeMs;
-        private long _stageSeq;
-        private long _stageT0Ticks;
-        private long _lastRawInputTicks;
-        private long _lastCommittedLocalTicks;
-
-        // Remaining physical movement spent reaching the Windows border during the crossing frame.
-        // Deducted once from the delayed WM_INPUT crossing report so overshoot transfers without doubling.
-        private int _crossCreditX;
-        private int _crossCreditY;
-        private long _crossCreditExpiryTicks;
-
-        // Short-lived credit if WH_MOUSE_LL fallback ran before a sudden late WM_INPUT arrival.
-        private int _fallbackHookCreditX;
-        private int _fallbackHookCreditY;
-        private long _fallbackHookCreditExpiryTicks;
-
-        private int _loggedRawCount;
-        private bool _loggedFirstHookPost;
-
-        public int AnchorX { get { lock (_lock) return _anchorX; } }
-        public int AnchorY { get { lock (_lock) return _anchorY; } }
-
-        public bool IsRawInputActive(long nowTicks)
-        {
-            lock (_lock) return IsRawInputActiveLocked(nowTicks);
-        }
-
-        private bool IsRawInputActiveLocked(long nowTicks) =>
-            _lastRawInputTicks != 0 && (nowTicks - _lastRawInputTicks) <= (long)(Stopwatch.Frequency * 300.0);
-
-        public void CommitLocalMove(long nowTicks)
-        {
-            lock (_lock)
-            {
-                if (_isRemote) return;
-                if (nowTicks > _lastCommittedLocalTicks)
-                {
-                    _lastCommittedLocalTicks = nowTicks;
-                }
-                for (int i = 0; i < _localRing.Length; i++)
-                {
-                    if (!_localRing[i].Consumed && _localRing[i].QpcTicks <= nowTicks)
-                    {
-                        _localRing[i].Consumed = true;
-                    }
-                }
-            }
-        }
-
-        public void EnterRemote(
-            int anchorX,
-            int anchorY,
-            int curX,
-            int curY,
-            int crossHookDx,
-            int crossHookDy,
-            uint crossTimeMs,
-            long nowTicks,
-            long stageSeq,
-            out int preOvershootX,
-            out int preOvershootY)
-        {
-            lock (_lock)
-            {
-                _isRemote = true;
-                _anchorX = anchorX;
-                _anchorY = anchorY;
-                _waitingHookAnchor = (curX != anchorX || curY != anchorY);
-                _awaitingPostCrossRaw = (crossTimeMs != 0);
-                _crossTimeMs = crossTimeMs;
-                _stageSeq = stageSeq;
-                _stageT0Ticks = nowTicks;
-
-                int creditX = Math.Clamp(crossHookDx, -450, 450);
-                int creditY = Math.Clamp(crossHookDy, -450, 450);
-
-                // Check whether WM_INPUT for this exact crossing swipe already ran in WndProc
-                // after the last committed local WH_MOUSE_LL move and slightly ahead of crossing WH_MOUSE_LL;
-                // if so, preserve its overshoot immediately and consume it.
-                int matchedRawX = 0;
-                int matchedRawY = 0;
-                long freshCutoff = nowTicks - (long)(Stopwatch.Frequency * 0.016);
-                if (_lastCommittedLocalTicks > freshCutoff)
-                {
-                    freshCutoff = _lastCommittedLocalTicks;
-                }
-                for (int i = 0; i < _localRing.Length; i++)
-                {
-                    if (!_localRing[i].Consumed &&
-                        (_lastCommittedLocalTicks > 0 ? _localRing[i].QpcTicks > _lastCommittedLocalTicks : _localRing[i].QpcTicks >= freshCutoff) &&
-                        unchecked((int)(_localRing[i].MsgTimeMs - crossTimeMs)) >= -16)
-                    {
-                        matchedRawX += _localRing[i].Dx;
-                        matchedRawY += _localRing[i].Dy;
-                        _localRing[i].Consumed = true;
-                    }
-                }
-
-                if (matchedRawX != 0 || matchedRawY != 0)
-                {
-                    preOvershootX = ConsumeWithCredit(matchedRawX, ref creditX);
-                    preOvershootY = ConsumeWithCredit(matchedRawY, ref creditY);
-                    _awaitingPostCrossRaw = false;
-                }
-                else
-                {
-                    preOvershootX = 0;
-                    preOvershootY = 0;
-                }
-
-                _crossCreditX = creditX;
-                _crossCreditY = creditY;
-                _crossCreditExpiryTicks = nowTicks + (long)(Stopwatch.Frequency * 0.045);
-
-                _fallbackHookCreditX = 0;
-                _fallbackHookCreditY = 0;
-                _fallbackHookCreditExpiryTicks = 0;
-                _loggedRawCount = 0;
-                _loggedFirstHookPost = false;
-            }
-        }
-
-        public void EnterRemote(int anchorX, int anchorY, int curX, int curY, uint crossTimeMs, long nowTicks)
-        {
-            EnterRemote(anchorX, anchorY, curX, curY, 0, 0, crossTimeMs, nowTicks, 0, out _, out _);
-        }
-
-        public void ExitRemote()
-        {
-            lock (_lock)
-            {
-                _isRemote = false;
-                _waitingHookAnchor = false;
-                _awaitingPostCrossRaw = false;
-                _crossCreditX = 0;
-                _crossCreditY = 0;
-                _fallbackHookCreditX = 0;
-                _fallbackHookCreditY = 0;
-            }
-        }
-
-        public void StartRewarp(int anchorX, int anchorY, uint eventTimeMs, long nowTicks)
-        {
-            lock (_lock)
-            {
-                _anchorX = anchorX;
-                _anchorY = anchorY;
-                _waitingHookAnchor = true;
-                _crossTimeMs = eventTimeMs;
-            }
-        }
-
-        public (bool needsRewarp, int dx, int dy) ProcessHookMouseMove(
-            int ptX,
-            int ptY,
-            uint eventTimeMs,
-            long nowTicks,
-            int monLeft = int.MinValue,
-            int monTop = int.MinValue,
-            int monRight = int.MaxValue,
-            int monBottom = int.MaxValue)
-        {
-            long logSeq = 0;
-            long logT0 = 0;
-            string? logMsg = null;
-
-            lock (_lock)
-            {
-                if (_anchorX < 0)
-                {
-                    _anchorX = ptX;
-                    _anchorY = ptY;
-                }
-
-                if (_waitingHookAnchor)
-                {
-                    if (ptX == _anchorX && ptY == _anchorY)
-                    {
-                        _waitingHookAnchor = false;
-                        if (!_loggedFirstHookPost && _stageSeq > 0)
-                        {
-                            _loggedFirstHookPost = true;
-                            logSeq = _stageSeq;
-                            logT0 = _stageT0Ticks;
-                            logMsg = $"hookPostRelocate pt=({ptX},{ptY}) echo=true rawActive={IsRawInputActiveLocked(nowTicks)} tMsg={eventTimeMs}";
-                        }
-                        goto Done;
-                    }
-
-                    // Deskflow MSWindowsComputer::onMouseMove geometric bogus-jump guard:
-                    // Ignore stale pre-warp events near the old crossing edge until cursor settles at center anchor.
-                    int bogusHalfW = (monRight > monLeft && monRight < int.MaxValue && monLeft > int.MinValue)
-                        ? Math.Max(120, ((monRight - monLeft) >> 1) - 10)
-                        : 450;
-                    int bogusHalfH = (monBottom > monTop && monBottom < int.MaxValue && monTop > int.MinValue)
-                        ? Math.Max(120, ((monBottom - monTop) >> 1) - 10)
-                        : 450;
-                    bool isPreWarpJump = Math.Abs(ptX - _anchorX) >= bogusHalfW || Math.Abs(ptY - _anchorY) >= bogusHalfH;
-                    if (isPreWarpJump)
-                    {
-                        if (!_loggedFirstHookPost && _stageSeq > 0)
-                        {
-                            _loggedFirstHookPost = true;
-                            logSeq = _stageSeq;
-                            logT0 = _stageT0Ticks;
-                            logMsg = $"hookPostRelocate pt=({ptX},{ptY}) echo=false_preWarpBogus rawActive={IsRawInputActiveLocked(nowTicks)} tMsg={eventTimeMs}";
-                        }
-                        goto Done;
-                    }
-
-                    // Cursor is already near center anchor (OS coalesced warp echo with first small move).
-                    _waitingHookAnchor = false;
-                }
-
-                if (!_loggedFirstHookPost && _stageSeq > 0)
-                {
-                    _loggedFirstHookPost = true;
-                    logSeq = _stageSeq;
-                    logT0 = _stageT0Ticks;
-                    logMsg = $"hookPostRelocate pt=({ptX},{ptY}) echo=false rawActive={IsRawInputActiveLocked(nowTicks)} tMsg={eventTimeMs}";
-                }
-
-                // When hardware/PTP WM_INPUT RIM_TYPEMOUSE is active, let WM_INPUT deliver 100% of
-                // unclamped relative deltas while WH_MOUSE_LL silently keeps the local cursor pinned at anchor.
-                if (IsRawInputActiveLocked(nowTicks))
-                {
-                    return EmitLogAndReturn(logSeq, logT0, logMsg, nowTicks, (false, 0, 0));
-                }
-
-                // Fallback path ONLY when no WM_INPUT packets exist (e.g. RDP/synthetic pointer).
-                int outDx = ptX - _anchorX;
-                int outDy = ptY - _anchorY;
-                if (Math.Abs(outDx) > 900 || Math.Abs(outDy) > 900)
-                {
-                    return EmitLogAndReturn(logSeq, logT0, logMsg, nowTicks, (true, 0, 0));
-                }
-
-                bool nearFallbackEdge = (monRight - monLeft > 260) &&
-                    (ptX <= monLeft + 1 || ptX >= monRight - 2 || ptY <= monTop + 1 || ptY >= monBottom - 2);
-
-                _fallbackHookCreditX += outDx;
-                _fallbackHookCreditY += outDy;
-                _fallbackHookCreditExpiryTicks = nowTicks + (long)(Stopwatch.Frequency * 0.004);
-                return EmitLogAndReturn(logSeq, logT0, logMsg, nowTicks, (nearFallbackEdge, outDx, outDy));
-            }
-
-        Done:
-            return EmitLogAndReturn(logSeq, logT0, logMsg, nowTicks, (false, 0, 0));
-        }
-
-        private static (bool needsRewarp, int dx, int dy) EmitLogAndReturn(
-            long logSeq, long logT0, string? logMsg, long nowTicks, (bool needsRewarp, int dx, int dy) result)
-        {
-            if (logMsg != null) WinKvmStageTracer.Log(logSeq, logT0, logMsg, nowTicks);
-            return result;
-        }
-
-        public (int dx, int dy) ProcessRawMouseInput(int lLastX, int lLastY, uint msgTimeMs, long nowTicks, IntPtr hDevice = default)
-        {
-            long logSeq = 0;
-            long logT0 = 0;
-            string? logMsg = null;
-            int outDx = 0;
-            int outDy = 0;
-
-            lock (_lock)
-            {
-                _lastRawInputTicks = nowTicks;
-                if (!_isRemote)
-                {
-                    _localRing[_ringWriteIdx] = new RawPacket
-                    {
-                        Dx = lLastX,
-                        Dy = lLastY,
-                        MsgTimeMs = msgTimeMs,
-                        QpcTicks = nowTicks,
-                        Consumed = false
-                    };
-                    _ringWriteIdx = (_ringWriteIdx + 1) % _localRing.Length;
-                    return (0, 0);
-                }
-
-                if (nowTicks > _crossCreditExpiryTicks)
-                {
-                    _crossCreditX = 0;
-                    _crossCreditY = 0;
-                }
-                if (nowTicks > _fallbackHookCreditExpiryTicks)
-                {
-                    _fallbackHookCreditX = 0;
-                    _fallbackHookCreditY = 0;
-                }
-
-                // Ignore obviously stale packets emitted well before the edge crossing until post-cross stream starts.
-                if (_awaitingPostCrossRaw && unchecked((int)(msgTimeMs - _crossTimeMs)) < -16)
-                {
-                    if (_stageSeq > 0 && _loggedRawCount < 3)
-                    {
-                        _loggedRawCount++;
-                        logSeq = _stageSeq;
-                        logT0 = _stageT0Ticks;
-                        logMsg = $"rawInput #{_loggedRawCount} skipped=preCross raw=({lLastX},{lLastY}) tMsg={msgTimeMs} crossT={_crossTimeMs}";
-                    }
-                    goto Done;
-                }
-                _awaitingPostCrossRaw = false;
-
-                int dx = lLastX;
-                int dy = lLastY;
-                if (_crossCreditX != 0 || _crossCreditY != 0)
-                {
-                    dx = ConsumeWithCredit(dx, ref _crossCreditX);
-                    dy = ConsumeWithCredit(dy, ref _crossCreditY);
-                }
-                if (_fallbackHookCreditX != 0 || _fallbackHookCreditY != 0)
-                {
-                    dx = ConsumeWithCredit(dx, ref _fallbackHookCreditX);
-                    dy = ConsumeWithCredit(dy, ref _fallbackHookCreditY);
-                }
-
-                outDx = dx;
-                outDy = dy;
-
-                if (_stageSeq > 0 && _loggedRawCount < 3)
-                {
-                    _loggedRawCount++;
-                    logSeq = _stageSeq;
-                    logT0 = _stageT0Ticks;
-                    logMsg = $"rawInput #{_loggedRawCount} raw=({lLastX},{lLastY}) out=({outDx},{outDy}) remCross=({_crossCreditX},{_crossCreditY}) hDev=0x{hDevice.ToInt64():X} tMsg={msgTimeMs}";
-                }
-            }
-
-        Done:
-            if (logMsg != null) WinKvmStageTracer.Log(logSeq, logT0, logMsg, nowTicks);
-            return (outDx, outDy);
-        }
-
-        private static int ConsumeWithCredit(int rawDelta, ref int credit)
-        {
-            if (rawDelta == 0) return 0;
-            if (credit == 0) return rawDelta;
-            if ((rawDelta > 0 && credit > 0) || (rawDelta < 0 && credit < 0))
-            {
-                if (Math.Abs(rawDelta) <= Math.Abs(credit))
-                {
-                    credit -= rawDelta;
-                    return 0;
-                }
-                int remaining = rawDelta - credit;
-                credit = 0;
-                return remaining;
-            }
-            return rawDelta;
-        }
-    }
     private bool _leftButtonDown = false;
     private int _dragDownX, _dragDownY;
     private bool _externalDragCandidate = false;
@@ -1370,59 +947,104 @@ public sealed partial class DeskflowService
         SendRemoteMouseMove(_remoteMacMonIdx, _remoteMacNormX, _remoteMacNormY);
     }
 
-    private static byte[] BuildRemoteMouseMovePayload(int monIdx, double nx, double ny)
+    private static void WriteRemoteMouseMovePayload(Span<byte> mb, int monIdx, double nx, double ny)
     {
-        byte[] mb = new byte[10];
-        mb[0] = (byte)((monIdx >> 8) & 0xFF); mb[1] = (byte)(monIdx & 0xFF);
+        mb[0] = (byte)((monIdx >> 8) & 0xFF);
+        mb[1] = (byte)(monIdx & 0xFF);
         int bx = BitConverter.SingleToInt32Bits((float)nx);
         int by = BitConverter.SingleToInt32Bits((float)ny);
         mb[2] = (byte)((bx >> 24) & 0xFF); mb[3] = (byte)((bx >> 16) & 0xFF);
         mb[4] = (byte)((bx >> 8) & 0xFF); mb[5] = (byte)(bx & 0xFF);
         mb[6] = (byte)((by >> 24) & 0xFF); mb[7] = (byte)((by >> 16) & 0xFF);
         mb[8] = (byte)((by >> 8) & 0xFF); mb[9] = (byte)(by & 0xFF);
-        return mb;
     }
 
-    private void SendRemoteMouseMove(int monIdx, double nx, double ny) =>
-        Transport.SendMouseMoveCoalesced(BuildRemoteMouseMovePayload(monIdx, nx, ny));
+    private void SendRemoteMouseMove(int monIdx, double nx, double ny)
+    {
+        Span<byte> mb = stackalloc byte[10];
+        WriteRemoteMouseMovePayload(mb, monIdx, nx, ny);
+        Transport.SendMouseMoveCoalesced(mb);
+    }
+
+    private static double EdgeOverlap(double a1, double a2, double b1, double b2) =>
+        Math.Max(0.0, Math.Min(a2, b2) - Math.Max(a1, b1));
+
+    private IndependentMonitorItem? FindNearestEdgeNeighbor(
+        string targetOsKind,
+        double edgeCoord,
+        double spanStart,
+        double spanEnd,
+        double crossCoord,
+        bool verticalEdge,
+        bool neighborEndsAtEdge)
+    {
+        IndependentMonitorItem? best = null;
+        double bestGap = double.MaxValue;
+        for (int i = 0; i < Monitors.Count; i++)
+        {
+            var c = Monitors[i];
+            if (c.OsKind != targetOsKind) continue;
+            double candEdge = verticalEdge
+                ? (neighborEndsAtEdge ? c.CanvasX + c.AspectWidth : c.CanvasX)
+                : (neighborEndsAtEdge ? c.CanvasY + c.AspectHeight : c.CanvasY);
+            double gap = Math.Abs(candEdge - edgeCoord);
+            if (gap > 36.0 || gap >= bestGap) continue;
+
+            double cStart = verticalEdge ? c.CanvasY : c.CanvasX;
+            double cEnd = verticalEdge ? c.CanvasY + c.AspectHeight : c.CanvasX + c.AspectWidth;
+            if (EdgeOverlap(spanStart, spanEnd, cStart, cEnd) <= 12.0) continue;
+            if (crossCoord < cStart - 8.0 || crossCoord > cEnd + 8.0) continue;
+
+            bestGap = gap;
+            best = c;
+        }
+        return best;
+    }
 
     private (int winMonIdx, double normX, double normY)? DetectReturnCrossingToWindows(double normX, double normY, double dx, double dy)
     {
-        var macNodes = Monitors.Where(m => m.OsKind == "macOS").ToList();
-        var winNodes = Monitors.Where(m => m.OsKind == "Windows").ToList();
-        if (macNodes.Count == 0 || winNodes.Count == 0) return null;
+        IndependentMonitorItem? activeMac = null;
+        bool hasWin = false;
+        for (int i = 0; i < Monitors.Count; i++)
+        {
+            var m = Monitors[i];
+            if (m.OsKind == "Windows")
+            {
+                hasWin = true;
+            }
+            else if (m.OsKind == "macOS")
+            {
+                if (activeMac == null || Math.Max(0, m.DisplayIndex - 1) == _remoteMacMonIdx)
+                {
+                    activeMac = m;
+                }
+            }
+        }
+        if (activeMac == null || !hasWin) return null;
 
-        var activeMac = macNodes.FirstOrDefault(m => Math.Max(0, m.DisplayIndex - 1) == _remoteMacMonIdx) ?? macNodes[0];
-        double cx = activeMac.CanvasX + Math.Clamp(normX, 0.0, 1.0) * activeMac.AspectWidth;
-        double cy = activeMac.CanvasY + Math.Clamp(normY, 0.0, 1.0) * activeMac.AspectHeight;
-        static double Overlap(double a1, double a2, double b1, double b2) => Math.Max(0, Math.Min(a2, b2) - Math.Max(a1, b1));
+        double ml = activeMac.CanvasX, mr = ml + activeMac.AspectWidth;
+        double mt = activeMac.CanvasY, mb = mt + activeMac.AspectHeight;
+        double cx = ml + Math.Clamp(normX, 0.0, 1.0) * activeMac.AspectWidth;
+        double cy = mt + Math.Clamp(normY, 0.0, 1.0) * activeMac.AspectHeight;
 
         if (normX <= 0.0 && dx < 0)
         {
-            var t = winNodes.Where(w => Math.Abs((w.CanvasX + w.AspectWidth) - activeMac.CanvasX) <= 36 && Overlap(activeMac.CanvasY, activeMac.CanvasY + activeMac.AspectHeight, w.CanvasY, w.CanvasY + w.AspectHeight) > 12)
-                            .Where(w => cy >= w.CanvasY - 8 && cy <= w.CanvasY + w.AspectHeight + 8)
-                            .OrderBy(w => Math.Abs((w.CanvasX + w.AspectWidth) - activeMac.CanvasX)).FirstOrDefault();
+            var t = FindNearestEdgeNeighbor("Windows", ml, mt, mb, cy, verticalEdge: true, neighborEndsAtEdge: true);
             if (t != null) return (Math.Max(0, t.DisplayIndex - 1), 0.97, Math.Clamp((cy - t.CanvasY) / Math.Max(1, t.AspectHeight), 0.03, 0.97));
         }
         if (normX >= 1.0 && dx > 0)
         {
-            var t = winNodes.Where(w => Math.Abs(w.CanvasX - (activeMac.CanvasX + activeMac.AspectWidth)) <= 36 && Overlap(activeMac.CanvasY, activeMac.CanvasY + activeMac.AspectHeight, w.CanvasY, w.CanvasY + w.AspectHeight) > 12)
-                            .Where(w => cy >= w.CanvasY - 8 && cy <= w.CanvasY + w.AspectHeight + 8)
-                            .OrderBy(w => Math.Abs(w.CanvasX - (activeMac.CanvasX + activeMac.AspectWidth))).FirstOrDefault();
+            var t = FindNearestEdgeNeighbor("Windows", mr, mt, mb, cy, verticalEdge: true, neighborEndsAtEdge: false);
             if (t != null) return (Math.Max(0, t.DisplayIndex - 1), 0.03, Math.Clamp((cy - t.CanvasY) / Math.Max(1, t.AspectHeight), 0.03, 0.97));
         }
         if (normY <= 0.0 && dy < 0)
         {
-            var t = winNodes.Where(w => Math.Abs((w.CanvasY + w.AspectHeight) - activeMac.CanvasY) <= 36 && Overlap(activeMac.CanvasX, activeMac.CanvasX + activeMac.AspectWidth, w.CanvasX, w.CanvasX + w.AspectWidth) > 12)
-                            .Where(w => cx >= w.CanvasX - 8 && cx <= w.CanvasX + w.AspectWidth + 8)
-                            .OrderBy(w => Math.Abs((w.CanvasY + w.AspectHeight) - activeMac.CanvasY)).FirstOrDefault();
+            var t = FindNearestEdgeNeighbor("Windows", mt, ml, mr, cx, verticalEdge: false, neighborEndsAtEdge: true);
             if (t != null) return (Math.Max(0, t.DisplayIndex - 1), Math.Clamp((cx - t.CanvasX) / Math.Max(1, t.AspectWidth), 0.03, 0.97), 0.97);
         }
         if (normY >= 1.0 && dy > 0)
         {
-            var t = winNodes.Where(w => Math.Abs(w.CanvasY - (activeMac.CanvasY + activeMac.AspectHeight)) <= 36 && Overlap(activeMac.CanvasX, activeMac.CanvasX + activeMac.AspectWidth, w.CanvasX, w.CanvasX + w.AspectWidth) > 12)
-                            .Where(w => cx >= w.CanvasX - 8 && cx <= w.CanvasX + w.AspectWidth + 8)
-                            .OrderBy(w => Math.Abs(w.CanvasY - (activeMac.CanvasY + activeMac.AspectHeight))).FirstOrDefault();
+            var t = FindNearestEdgeNeighbor("Windows", mb, ml, mr, cx, verticalEdge: false, neighborEndsAtEdge: false);
             if (t != null) return (Math.Max(0, t.DisplayIndex - 1), Math.Clamp((cx - t.CanvasX) / Math.Max(1, t.AspectWidth), 0.03, 0.97), 0.03);
         }
         return null;
@@ -1498,12 +1120,16 @@ public sealed partial class DeskflowService
         bool atBottom = py >= lm.BoundsY + lm.HeightPx - tolerance;
         if (!atLeft && !atRight && !atTop && !atBottom) return null;
 
-        var winNode = Monitors.FirstOrDefault(m => m.OsKind == "Windows" && m.DisplayIndex == lm.DisplayIndex);
-        if (winNode == null) return null;
-        var macNodes = Monitors.Where(m => m.OsKind == "macOS").ToList();
-        if (macNodes.Count == 0) return null;
+        IndependentMonitorItem? winNode = null;
+        bool hasMac = false;
+        for (int i = 0; i < Monitors.Count; i++)
+        {
+            var m = Monitors[i];
+            if (m.OsKind == "Windows" && m.DisplayIndex == lm.DisplayIndex) winNode ??= m;
+            else if (m.OsKind == "macOS") hasMac = true;
+        }
+        if (winNode == null || !hasMac) return null;
 
-        static double Overlap(double a1, double a2, double b1, double b2) => Math.Max(0, Math.Min(a2, b2) - Math.Max(a1, b1));
         double nx = Math.Clamp((double)(px - lm.BoundsX) / Math.Max(1, lm.WidthPx), 0.03, 0.97);
         double ny = Math.Clamp((double)(py - lm.BoundsY) / Math.Max(1, lm.HeightPx), 0.03, 0.97);
         double wl = winNode.CanvasX, wr = wl + winNode.AspectWidth, wt = winNode.CanvasY, wb = wt + winNode.AspectHeight;
@@ -1512,501 +1138,26 @@ public sealed partial class DeskflowService
 
         if (atLeft)
         {
-            var t = macNodes.Where(m => Math.Abs((m.CanvasX + m.AspectWidth) - wl) <= 36 && Overlap(wt, wb, m.CanvasY, m.CanvasY + m.AspectHeight) > 12)
-                            .Where(m => canvasY >= m.CanvasY - 8 && canvasY <= m.CanvasY + m.AspectHeight + 8)
-                            .OrderBy(m => Math.Abs(wl - (m.CanvasX + m.AspectWidth))).FirstOrDefault();
+            var t = FindNearestEdgeNeighbor("macOS", wl, wt, wb, canvasY, verticalEdge: true, neighborEndsAtEdge: true);
             if (t != null) return (Math.Max(0, t.DisplayIndex - 1), 0.992, Math.Clamp((canvasY - t.CanvasY) / Math.Max(1, t.AspectHeight), 0.01, 0.99));
         }
         if (atRight)
         {
-            var t = macNodes.Where(m => Math.Abs(m.CanvasX - wr) <= 36 && Overlap(wt, wb, m.CanvasY, m.CanvasY + m.AspectHeight) > 12)
-                            .Where(m => canvasY >= m.CanvasY - 8 && canvasY <= m.CanvasY + m.AspectHeight + 8)
-                            .OrderBy(m => Math.Abs(m.CanvasX - wr)).FirstOrDefault();
+            var t = FindNearestEdgeNeighbor("macOS", wr, wt, wb, canvasY, verticalEdge: true, neighborEndsAtEdge: false);
             if (t != null) return (Math.Max(0, t.DisplayIndex - 1), 0.008, Math.Clamp((canvasY - t.CanvasY) / Math.Max(1, t.AspectHeight), 0.01, 0.99));
         }
         if (atTop)
         {
-            var t = macNodes.Where(m => Math.Abs((m.CanvasY + m.AspectHeight) - wt) <= 36 && Overlap(wl, wr, m.CanvasX, m.CanvasX + m.AspectWidth) > 12)
-                            .Where(m => canvasX >= m.CanvasX - 8 && canvasX <= m.CanvasX + m.AspectWidth + 8)
-                            .OrderBy(m => Math.Abs(wt - (m.CanvasY + m.AspectHeight))).FirstOrDefault();
+            var t = FindNearestEdgeNeighbor("macOS", wt, wl, wr, canvasX, verticalEdge: false, neighborEndsAtEdge: true);
             if (t != null) return (Math.Max(0, t.DisplayIndex - 1), Math.Clamp((canvasX - t.CanvasX) / Math.Max(1, t.AspectWidth), 0.01, 0.99), 0.992);
         }
         if (atBottom)
         {
-            var t = macNodes.Where(m => Math.Abs(m.CanvasY - wb) <= 36 && Overlap(wl, wr, m.CanvasX, m.CanvasX + m.AspectWidth) > 12)
-                            .Where(m => canvasX >= m.CanvasX - 8 && canvasX <= m.CanvasX + m.AspectWidth + 8)
-                            .OrderBy(m => Math.Abs(m.CanvasY - wb)).FirstOrDefault();
+            var t = FindNearestEdgeNeighbor("macOS", wb, wl, wr, canvasX, verticalEdge: false, neighborEndsAtEdge: false);
             if (t != null) return (Math.Max(0, t.DisplayIndex - 1), Math.Clamp((canvasX - t.CanvasX) / Math.Max(1, t.AspectWidth), 0.01, 0.99), 0.008);
         }
         return null;
     }
 
-    // MARK: - Windows Precision Touchpad HID Raw Input (Win -> Mac Gestures)
-
-    private bool _ptpRawRegistered = false;
-    private readonly Dictionary<IntPtr, PtpDeviceSchema> _ptpDeviceCache = new();
-    private int _tpFingerCount = 0;
-    private bool _tpThreeFingerDragging = false;
-    private bool _tpHasStart = false;
-    private bool _tpHasPrev = false;
-    private bool _tpHasFilteredDelta = false;
-    private double _tpStartX, _tpStartY;
-    private double _tpPrevX, _tpPrevY;
-    private double _tpFiltDx, _tpFiltDy;
-    private double _tpPendingDx, _tpPendingDy;
-    private long _tpThreeFingerEnterTicksMs = 0;
-    private long _tpLastDragMoveTicksMs = 0;
-
     private bool IsHotkeyRuleEnabled(string id) => HotkeyRules.Any(r => r.Id == id && r.Enabled);
-
-    public void EnsureTouchpadRawInputRegistered(IntPtr hwnd)
-    {
-        if (_ptpRawRegistered || hwnd == IntPtr.Zero) return;
-        var rid = new[]
-        {
-            new RAWINPUTDEVICE
-            {
-                usUsagePage = 0x0D, // HID_USAGE_PAGE_DIGITIZER
-                usUsage = 0x05,     // HID_USAGE_DIGITIZER_TOUCH_PAD
-                dwFlags = 0x00000100, // RIDEV_INPUTSINK
-                hwndTarget = hwnd
-            },
-            new RAWINPUTDEVICE
-            {
-                usUsagePage = 0x01, // HID_USAGE_PAGE_GENERIC
-                usUsage = 0x02,     // HID_USAGE_GENERIC_MOUSE
-                dwFlags = 0x00000100, // RIDEV_INPUTSINK
-                hwndTarget = hwnd
-            }
-        };
-        if (RegisterRawInputDevices(rid, (uint)rid.Length, (uint)Marshal.SizeOf<RAWINPUTDEVICE>()))
-        {
-            _ptpRawRegistered = true;
-            LogMessage?.Invoke("[手势] Windows 精确触控板及鼠标 Raw Input HID 监听已就绪 (Win → Mac)");
-        }
-    }
-
-    public void HandleTouchpadRawInput(IntPtr hRawInput)
-    {
-        if (!KvmEnabled || _kvmShuttingDown) return;
-
-        uint size = 0;
-        uint hdrSize = (uint)Marshal.SizeOf<RAWINPUTHEADER>();
-        if (GetRawInputData(hRawInput, RID_INPUT, IntPtr.Zero, ref size, hdrSize) != 0 || size < hdrSize + 8)
-            return;
-
-        IntPtr buf = Marshal.AllocHGlobal((int)size);
-        try
-        {
-            if (GetRawInputData(hRawInput, RID_INPUT, buf, ref size, hdrSize) != size) return;
-            var hdr = Marshal.PtrToStructure<RAWINPUTHEADER>(buf);
-            if (hdr.dwType == RIM_TYPEMOUSE)
-            {
-                if (size >= hdrSize + (uint)Marshal.SizeOf<RAWMOUSE>())
-                {
-                    var rm = Marshal.PtrToStructure<RAWMOUSE>(buf + (int)hdrSize);
-                    if ((rm.usFlags & MOUSE_MOVE_ABSOLUTE) == 0 &&
-                        rm.ulExtraInformation != (uint)OMNI_INJECTED_TAG.ToInt64() &&
-                        (rm.lLastX != 0 || rm.lLastY != 0))
-                    {
-                        uint msgTime = unchecked((uint)GetMessageTime());
-                        var rawStep = _cursorTracker.ProcessRawMouseInput(rm.lLastX, rm.lLastY, msgTime, Stopwatch.GetTimestamp(), hdr.hDevice);
-                        if (RemoteFocusActive &&
-                            Transport.ActiveLinksSnapshot().Count > 0 &&
-                            (rawStep.dx != 0 || rawStep.dy != 0))
-                        {
-                            ApplyRemoteMouseDelta(rawStep.dx, rawStep.dy);
-                        }
-                    }
-                }
-                return;
-            }
-
-            if (!RemoteFocusActive || Transport.ActiveLinksSnapshot().Count == 0)
-            {
-                if (_tpThreeFingerDragging)
-                {
-                    _tpThreeFingerDragging = false;
-                    Transport.SendControlFrame(DeskflowMsgType.MouseButton, new byte[] { 1, 0 });
-                }
-                _tpFingerCount = 0;
-                _tpHasStart = false;
-                _tpHasPrev = false;
-                return;
-            }
-
-            if (hdr.dwType != RIM_TYPEHID) return;
-
-            var schema = GetOrLoadPtpSchema(hdr.hDevice);
-            if (schema == null || schema.Slots.Count == 0) return;
-
-            int dwSizeHid = Marshal.ReadInt32(buf, (int)hdrSize);
-            int dwCount = Marshal.ReadInt32(buf, (int)hdrSize + 4);
-            if (dwSizeHid <= 0 || dwCount <= 0) return;
-
-            byte[] report = new byte[dwSizeHid];
-            for (int r = 0; r < dwCount; r++)
-            {
-                int offset = (int)hdrSize + 8 + r * dwSizeHid;
-                if (offset + dwSizeHid > size) break;
-                Marshal.Copy(buf + offset, report, 0, dwSizeHid);
-                ParsePtpReportAndDispatch(schema, report);
-            }
-        }
-        finally
-        {
-            Marshal.FreeHGlobal(buf);
-        }
-    }
-
-    private PtpDeviceSchema? GetOrLoadPtpSchema(IntPtr hDevice)
-    {
-        if (hDevice == IntPtr.Zero) return null;
-        if (_ptpDeviceCache.TryGetValue(hDevice, out var cached)) return cached;
-
-        uint ppSize = 0;
-        if (GetRawInputDeviceInfo(hDevice, RIDI_PREPARSEDDATA, IntPtr.Zero, ref ppSize) == unchecked((uint)-1) || ppSize == 0)
-            return null;
-
-        IntPtr preparsed = Marshal.AllocHGlobal((int)ppSize);
-        try
-        {
-            if (GetRawInputDeviceInfo(hDevice, RIDI_PREPARSEDDATA, preparsed, ref ppSize) == unchecked((uint)-1))
-            {
-                Marshal.FreeHGlobal(preparsed);
-                return null;
-            }
-            if (HidP_GetCaps(preparsed, out var caps) != HIDP_STATUS_SUCCESS)
-            {
-                Marshal.FreeHGlobal(preparsed);
-                return null;
-            }
-            if (caps.UsagePage != 0x0D || caps.Usage != 0x05)
-            {
-                Marshal.FreeHGlobal(preparsed);
-                return null;
-            }
-
-            ushort vCapCount = caps.NumberInputValueCaps;
-            var vCaps = new HIDP_VALUE_CAPS[Math.Max(1, (int)vCapCount)];
-            if (vCapCount > 0)
-            {
-                HidP_GetValueCaps(0, vCaps, ref vCapCount, preparsed);
-            }
-
-            uint lcCount = caps.NumberLinkCollectionNodes;
-            var lcs = new HIDP_LINK_COLLECTION_NODE[Math.Max(1, (int)lcCount)];
-            if (lcCount > 0)
-            {
-                HidP_GetLinkCollectionNodes(lcs, ref lcCount, preparsed);
-            }
-
-            var fingerColls = new List<ushort>();
-            for (int i = 0; i < lcCount; i++)
-            {
-                if (lcs[i].LinkUsagePage == 0x0D && lcs[i].LinkUsage == 0x22)
-                    fingerColls.Add((ushort)i);
-            }
-
-            var slots = new List<PtpFingerSlot>();
-            foreach (ushort lc in fingerColls)
-            {
-                int minX = 0, maxX = 4096, minY = 0, maxY = 4096;
-                foreach (var vc in vCaps.Take(vCapCount))
-                {
-                    if (vc.LinkCollection != lc || vc.UsagePage != 0x01) continue;
-                    ushort uMin = vc.UsageMinOrUsage;
-                    ushort uMax = vc.IsRange != 0 ? vc.UsageMax : uMin;
-                    if (uMin <= 0x30 && 0x30 <= uMax)
-                    {
-                        minX = vc.LogicalMin;
-                        maxX = vc.LogicalMax > vc.LogicalMin ? vc.LogicalMax : 4096;
-                    }
-                    if (uMin <= 0x31 && 0x31 <= uMax)
-                    {
-                        minY = vc.LogicalMin;
-                        maxY = vc.LogicalMax > vc.LogicalMin ? vc.LogicalMax : 4096;
-                    }
-                }
-                slots.Add(new PtpFingerSlot(lc, minX, maxX, minY, maxY));
-            }
-
-            var schema = new PtpDeviceSchema(preparsed, slots);
-            _ptpDeviceCache[hDevice] = schema;
-            return schema;
-        }
-        catch
-        {
-            Marshal.FreeHGlobal(preparsed);
-            return null;
-        }
-    }
-
-    private void ParsePtpReportAndDispatch(PtpDeviceSchema schema, byte[] report)
-    {
-        var points = new List<(double X, double Y)>(schema.Slots.Count);
-        uint rLen = (uint)report.Length;
-        uint reportedCount = 0;
-        bool hasCount = HidP_GetUsageValue(0, 0x0D, 0, 0x54, out reportedCount, schema.PreparsedData, report, rLen) == HIDP_STATUS_SUCCESS;
-
-        var usages = new ushort[8];
-        foreach (var slot in schema.Slots)
-        {
-            uint uLen = (uint)usages.Length;
-            int status = HidP_GetUsages(0, 0x0D, slot.LinkCollection, usages, ref uLen, schema.PreparsedData, report, rLen);
-            bool tipDown = status == HIDP_STATUS_SUCCESS && usages.Take((int)uLen).Any(u => u == 0x42);
-            if (!tipDown) continue;
-
-            if (HidP_GetUsageValue(0, 0x01, slot.LinkCollection, 0x30, out uint rawX, schema.PreparsedData, report, rLen) != HIDP_STATUS_SUCCESS) continue;
-            if (HidP_GetUsageValue(0, 0x01, slot.LinkCollection, 0x31, out uint rawY, schema.PreparsedData, report, rLen) != HIDP_STATUS_SUCCESS) continue;
-
-            double nx = ((int)rawX - slot.MinX) / Math.Max(1.0, slot.MaxX - slot.MinX);
-            double ny = ((int)rawY - slot.MinY) / Math.Max(1.0, slot.MaxY - slot.MinY);
-            points.Add((Math.Clamp(nx, 0.0, 1.0), Math.Clamp(ny, 0.0, 1.0)));
-        }
-
-        if (hasCount && reportedCount > 0 && points.Count > (int)reportedCount)
-            points = points.Take((int)reportedCount).ToList();
-
-        ProcessTouchpadContacts(points);
-    }
-
-    private void ProcessTouchpadContacts(List<(double X, double Y)> points)
-    {
-        int count = points.Count;
-        _tpFingerCount = count;
-
-        if (count != 3)
-        {
-            // Release immediately on finger lift/change without applying centroid jump delta
-            if (_tpThreeFingerDragging)
-            {
-                _tpThreeFingerDragging = false;
-                Transport.SendControlFrame(DeskflowMsgType.MouseButton, new byte[] { 1, 0 });
-            }
-            _tpHasStart = false;
-            _tpHasPrev = false;
-            _tpHasFilteredDelta = false;
-            _tpPendingDx = 0;
-            _tpPendingDy = 0;
-            _tpThreeFingerEnterTicksMs = 0;
-            return;
-        }
-
-        bool allow3fDrag = IsHotkeyRuleEnabled("win_tp_3f_drag");
-        if (!allow3fDrag)
-        {
-            if (_tpThreeFingerDragging)
-            {
-                _tpThreeFingerDragging = false;
-                Transport.SendControlFrame(DeskflowMsgType.MouseButton, new byte[] { 1, 0 });
-            }
-            _tpHasStart = false;
-            _tpHasPrev = false;
-            _tpHasFilteredDelta = false;
-            _tpPendingDx = 0;
-            _tpPendingDy = 0;
-            _tpThreeFingerEnterTicksMs = 0;
-            return;
-        }
-
-        double avgX = points.Average(p => p.X);
-        double avgY = points.Average(p => p.Y);
-        long nowMs = Environment.TickCount64;
-
-        if (!_tpHasStart)
-        {
-            _tpStartX = avgX;
-            _tpStartY = avgY;
-            _tpPrevX = avgX;
-            _tpPrevY = avgY;
-            _tpHasStart = true;
-            _tpHasPrev = true;
-            _tpHasFilteredDelta = false;
-            _tpPendingDx = 0;
-            _tpPendingDy = 0;
-            _tpThreeFingerEnterTicksMs = nowMs;
-            return;
-        }
-
-        double rawDx = avgX - (_tpHasPrev ? _tpPrevX : avgX);
-        double rawDy = avgY - (_tpHasPrev ? _tpPrevY : avgY);
-        _tpPrevX = avgX;
-        _tpPrevY = avgY;
-        _tpHasPrev = true;
-
-        // Ignore abnormal single-frame centroid jumps caused by staggered finger touch/lift or palm rejection
-        if (Math.Abs(rawDx) > 0.065 || Math.Abs(rawDy) > 0.065)
-        {
-            if (!_tpThreeFingerDragging)
-            {
-                _tpStartX = avgX;
-                _tpStartY = avgY;
-            }
-            return;
-        }
-
-        if (!_tpThreeFingerDragging)
-        {
-            double sx = avgX - _tpStartX;
-            double sy = avgY - _tpStartY;
-            // Require >= 35ms finger settle + >= 0.012 normalized movement before initiating drag
-            if (nowMs - _tpThreeFingerEnterTicksMs >= 35 && Math.Sqrt(sx * sx + sy * sy) >= 0.012)
-            {
-                _tpThreeFingerDragging = true;
-                _tpHasFilteredDelta = false;
-                _tpPendingDx = 0;
-                _tpPendingDy = 0;
-                _tpLastDragMoveTicksMs = 0;
-                Transport.SendControlFrame(DeskflowMsgType.MouseButton, new byte[] { 1, 1 });
-            }
-            return;
-        }
-
-        _tpPendingDx += rawDx;
-        _tpPendingDy += rawDy;
-
-        // Throttle remote drag updates to ~70Hz so high-latency Wi-Fi links do not buffer long move queues
-        if (nowMs - _tpLastDragMoveTicksMs < 14) return;
-
-        // Deadzone filters micro-jitter while fingers rest stationary
-        if (Math.Abs(_tpPendingDx) < 0.0010 && Math.Abs(_tpPendingDy) < 0.0010)
-        {
-            _tpPendingDx = 0;
-            _tpPendingDy = 0;
-            return;
-        }
-
-        double smoothDx = _tpHasFilteredDelta ? (_tpFiltDx * 0.25 + _tpPendingDx * 0.75) : _tpPendingDx;
-        double smoothDy = _tpHasFilteredDelta ? (_tpFiltDy * 0.25 + _tpPendingDy * 0.75) : _tpPendingDy;
-        _tpFiltDx = smoothDx;
-        _tpFiltDy = smoothDy;
-        _tpHasFilteredDelta = true;
-        _tpPendingDx = 0;
-        _tpPendingDy = 0;
-        _tpLastDragMoveTicksMs = nowMs;
-
-        _remoteMacNormX = Math.Clamp(_remoteMacNormX + smoothDx * 1.05, 0.0, 1.0);
-        _remoteMacNormY = Math.Clamp(_remoteMacNormY + smoothDy * 1.05, 0.0, 1.0);
-        SendRemoteMouseMove(_remoteMacMonIdx, _remoteMacNormX, _remoteMacNormY);
-    }
-
-    private sealed record PtpFingerSlot(ushort LinkCollection, int MinX, int MaxX, int MinY, int MaxY);
-    private sealed class PtpDeviceSchema
-    {
-        public IntPtr PreparsedData { get; }
-        public List<PtpFingerSlot> Slots { get; }
-        public PtpDeviceSchema(IntPtr preparsed, List<PtpFingerSlot> slots)
-        {
-            PreparsedData = preparsed;
-            Slots = slots;
-        }
-    }
-
-    private const uint RID_INPUT = 0x10000003;
-    private const uint RIM_TYPEMOUSE = 0;
-    private const uint RIM_TYPEHID = 2;
-    private const ushort MOUSE_MOVE_ABSOLUTE = 0x0001;
-    private const uint RIDI_PREPARSEDDATA = 0x20000005;
-    private const int HIDP_STATUS_SUCCESS = 0x00110000;
-
-    [StructLayout(LayoutKind.Explicit, Size = 24)]
-    internal struct RAWMOUSE
-    {
-        [FieldOffset(0)] public ushort usFlags;
-        [FieldOffset(4)] public uint ulButtons;
-        [FieldOffset(8)] public uint ulRawButtons;
-        [FieldOffset(12)] public int lLastX;
-        [FieldOffset(16)] public int lLastY;
-        [FieldOffset(20)] public uint ulExtraInformation;
-    }
-
-    [StructLayout(LayoutKind.Sequential)]
-    private struct RAWINPUTDEVICE
-    {
-        public ushort usUsagePage;
-        public ushort usUsage;
-        public uint dwFlags;
-        public IntPtr hwndTarget;
-    }
-
-    [StructLayout(LayoutKind.Sequential)]
-    private struct RAWINPUTHEADER
-    {
-        public uint dwType;
-        public uint dwSize;
-        public IntPtr hDevice;
-        public IntPtr wParam;
-    }
-
-    [StructLayout(LayoutKind.Sequential)]
-    private struct HIDP_CAPS
-    {
-        public ushort Usage;
-        public ushort UsagePage;
-        public ushort InputReportByteLength;
-        public ushort OutputReportByteLength;
-        public ushort FeatureReportByteLength;
-        [MarshalAs(UnmanagedType.ByValArray, SizeConst = 17)]
-        public ushort[] Reserved;
-        public ushort NumberLinkCollectionNodes;
-        public ushort NumberInputButtonCaps;
-        public ushort NumberInputValueCaps;
-        public ushort NumberInputDataIndices;
-        public ushort NumberOutputButtonCaps;
-        public ushort NumberOutputValueCaps;
-        public ushort NumberOutputDataIndices;
-        public ushort NumberFeatureButtonCaps;
-        public ushort NumberFeatureValueCaps;
-        public ushort NumberFeatureDataIndices;
-    }
-
-    [StructLayout(LayoutKind.Sequential)]
-    private struct HIDP_LINK_COLLECTION_NODE
-    {
-        public ushort LinkUsage;
-        public ushort LinkUsagePage;
-        public ushort Parent;
-        public ushort NumberOfChildren;
-        public ushort NextSibling;
-        public ushort FirstChild;
-        public uint BitFields;
-        public IntPtr UserContext;
-    }
-
-    [StructLayout(LayoutKind.Explicit, Size = 72)]
-    private struct HIDP_VALUE_CAPS
-    {
-        [FieldOffset(0)] public ushort UsagePage;
-        [FieldOffset(6)] public ushort LinkCollection;
-        [FieldOffset(12)] public byte IsRange;
-        [FieldOffset(40)] public int LogicalMin;
-        [FieldOffset(44)] public int LogicalMax;
-        [FieldOffset(56)] public ushort UsageMinOrUsage;
-        [FieldOffset(58)] public ushort UsageMax;
-    }
-
-    [DllImport("user32.dll", SetLastError = true)]
-    private static extern bool RegisterRawInputDevices(RAWINPUTDEVICE[] pRawInputDevices, uint uiNumDevices, uint cbSize);
-
-    [DllImport("user32.dll")]
-    private static extern uint GetRawInputData(IntPtr hRawInput, uint uiCommand, IntPtr pData, ref uint pcbSize, uint cbSizeHeader);
-
-    [DllImport("user32.dll")]
-    private static extern uint GetRawInputDeviceInfo(IntPtr hDevice, uint uiCommand, IntPtr pData, ref uint pcbSize);
-
-    [DllImport("hid.dll")]
-    private static extern int HidP_GetCaps(IntPtr PreparsedData, out HIDP_CAPS Capabilities);
-
-    [DllImport("hid.dll")]
-    private static extern int HidP_GetLinkCollectionNodes([Out] HIDP_LINK_COLLECTION_NODE[] LinkCollectionNodes, ref uint LinkCollectionNodesLength, IntPtr PreparsedData);
-
-    [DllImport("hid.dll")]
-    private static extern int HidP_GetValueCaps(int ReportType, [Out] HIDP_VALUE_CAPS[] ValueCaps, ref ushort ValueCapsLength, IntPtr PreparsedData);
-
-    [DllImport("hid.dll")]
-    private static extern int HidP_GetUsageValue(int ReportType, ushort UsagePage, ushort LinkCollection, ushort Usage, out uint UsageValue, IntPtr PreparsedData, byte[] Report, uint ReportLength);
-
-    [DllImport("hid.dll")]
-    private static extern int HidP_GetUsages(int ReportType, ushort UsagePage, ushort LinkCollection, [Out] ushort[] UsageList, ref uint UsageLength, IntPtr PreparsedData, byte[] Report, uint ReportLength);
 }

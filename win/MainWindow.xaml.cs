@@ -466,7 +466,9 @@ public partial class MainWindow : Window
             UsbPortCardSub.Text = _service.UsbHardwareDetected
                 ? AppLoc.T($"驱动: {_service.UsbDriverService} · {_service.UsbSpeedLabel}", $"Driver: {_service.UsbDriverService} · {_service.UsbSpeedLabel}")
                 : AppLoc.T("用 USB-C 线连上 Mac 就行", "Connect Mac via USB-C cable");
-            UsbIpCardValue.Text = liveUsbNic != null ? $"{liveUsbNic.LocalIp} ↔ {liveUsbNic.PeerIp}" : "10.13.37.2 ↔ 10.13.37.1";
+            UsbIpCardValue.Text = liveUsbNic != null
+                ? $"{liveUsbNic.LocalIp} ↔ {liveUsbNic.PeerIp}"
+                : $"{DeskflowUsbConstants.WinUsbIp} ↔ {DeskflowUsbConstants.MacUsbIp}";
             UsbIpCardSub.Text = liveUsbNic != null ? AppLoc.T("直连已通 (:24810)", "Direct Tunnel Ready (:24810)") : AppLoc.T("USB 直连", "USB Direct");
             UsbTrafficCardValue.Text = AppLoc.T($"收 {_service.UsbRxPackets} / 发 {_service.UsbTxPackets}", $"RX {_service.UsbRxPackets} / TX {_service.UsbTxPackets}");
             UsbTrafficCardSub.Text = liveUsbNic?.RttMs != null
@@ -822,7 +824,7 @@ public partial class MainWindow : Window
         _service.MultipathEnabled = MultipathToggle.IsChecked == true;
         _service.OverlayEnabled = OverlayToggle.IsChecked == true;
         if (prevMp != _service.MultipathEnabled)
-            _service.RefreshNicChannels("10.13.37.2", "10.13.37.1", 3200);
+            _service.RefreshNicChannels(DeskflowUsbConstants.WinUsbIp, DeskflowUsbConstants.MacUsbIp, DeskflowUsbConstants.DefaultUsbSpeedMbps);
 
         var prevCtrl = _service.ControlMode;
         if (CtrlMacRadio.IsChecked == true) _service.ControlMode = KvmControlMode.MacMasterOnly;

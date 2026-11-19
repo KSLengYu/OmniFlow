@@ -132,7 +132,7 @@ public sealed partial class DeskflowService
                         UsbActionHint = AppLoc.T($"进程已停止 (exit={exitCode})", $"Process exited ({exitCode})");
                         AppendUsbLog($"USB 隧道进程已退出 (exit={exitCode})");
                     }
-                    RefreshNicChannels("10.13.37.2", "10.13.37.1", UsbSpeedMbps > 0 ? UsbSpeedMbps : 3200);
+                    RefreshNicChannels(DeskflowUsbConstants.WinUsbIp, DeskflowUsbConstants.MacUsbIp, UsbSpeedMbps > 0 ? UsbSpeedMbps : DeskflowUsbConstants.DefaultUsbSpeedMbps);
                     StateUpdated?.Invoke();
                 });
             };
@@ -144,8 +144,8 @@ public sealed partial class DeskflowService
             UsbConnectProgress = Math.Max(UsbConnectProgress, 0.28);
             UsbProgressCeil = Math.Max(UsbProgressCeil, 0.48);
             UsbActionHint = AppLoc.T("步骤 1/3 · 已静默拉起 USB 隧道，正在检测 Apple NCM 接口...", "Step 1/3 · USB backend started, probing Apple NCM interface...");
-            Transport.ReconnectChannel("USB-C NCM", "10.13.37.2", "10.13.37.1");
-            Transport.AddManualPeerIp("10.13.37.1");
+            Transport.ReconnectChannel("USB-C NCM", DeskflowUsbConstants.WinUsbIp, DeskflowUsbConstants.MacUsbIp);
+            Transport.AddManualPeerIp(DeskflowUsbConstants.MacUsbIp);
             StateUpdated?.Invoke();
         }
         catch (Exception ex)
@@ -197,8 +197,8 @@ public sealed partial class DeskflowService
             UsbHeadline = AppLoc.T("Wintun 隧道已启动，正在与 Mac 建连...", "Wintun tunnel UP, handshaking with Mac...");
             UsbSubline = AppLoc.T("本机 10.13.37.2 已就绪，正在握手 Mac 端 (10.13.37.1:24810)", "10.13.37.2 active, connecting to Mac (10.13.37.1:24810)");
             UsbActionHint = AppLoc.T("步骤 3/3 · Wintun 隧道已运行，正在自动建立高速传输通道...", "Step 3/3 · Wintun tunnel running, establishing data channel...");
-            Transport.AddManualPeerIp("10.13.37.1");
-            RefreshNicChannels("10.13.37.2", "10.13.37.1", UsbSpeedMbps > 0 ? UsbSpeedMbps : 3200);
+            Transport.AddManualPeerIp(DeskflowUsbConstants.MacUsbIp);
+            RefreshNicChannels(DeskflowUsbConstants.WinUsbIp, DeskflowUsbConstants.MacUsbIp, UsbSpeedMbps > 0 ? UsbSpeedMbps : DeskflowUsbConstants.DefaultUsbSpeedMbps);
         }
         else if (line.StartsWith("[STAT]", StringComparison.OrdinalIgnoreCase))
         {
@@ -224,7 +224,7 @@ public sealed partial class DeskflowService
         _pendingRestoreComplete = alsoRestoreAppleDriver;
 
         // Immediately drop USB transport links & failover to Ethernet/LAN BEFORE tearing down Wintun/WinUSB so KVM/transfers never stall!
-        Transport.DisconnectChannel("USB-C NCM", "10.13.37.2");
+        Transport.DisconnectChannel("USB-C NCM", DeskflowUsbConstants.WinUsbIp);
         Transport.EnsureLanLinksConnected();
 
         UsbProcessRunning = false;
@@ -240,7 +240,7 @@ public sealed partial class DeskflowService
             : AppLoc.T("已切回以太网/LAN，后台正在关闭 USB 隧道...", "Switched back to Ethernet/LAN, closing USB tunnel...");
         UsbActionHint = AppLoc.T("控制与数据链路已切回以太网 · 后台正在执行清理...", "Traffic failed over to LAN · Cleaning up in background...");
         AppendUsbLog(alsoRestoreAppleDriver ? "断开通道并恢复苹果原厂 USB 驱动..." : "正在手动停止 USB 直连隧道（已即时切回以太网）...");
-        RefreshNicChannels("10.13.37.2", "10.13.37.1", 3200);
+        RefreshNicChannels(DeskflowUsbConstants.WinUsbIp, DeskflowUsbConstants.MacUsbIp, DeskflowUsbConstants.DefaultUsbSpeedMbps);
         StateUpdated?.Invoke();
 
         _ = Task.Run(async () =>
@@ -315,7 +315,7 @@ public sealed partial class DeskflowService
             : "已安全停用 USB，LAN/Wi-Fi 通道正常工作；点击「启动 USB 直连」可随时重连";
         UsbActionHint = restored ? "已卸载 WinUSB，苹果原厂驱动已就绪" : "已安全停用 USB，LAN/Wi-Fi 通道正常工作";
         Transport.EnsureLanLinksConnected();
-        RefreshNicChannels("10.13.37.2", "10.13.37.1", 3200);
+        RefreshNicChannels(DeskflowUsbConstants.WinUsbIp, DeskflowUsbConstants.MacUsbIp, DeskflowUsbConstants.DefaultUsbSpeedMbps);
         StateUpdated?.Invoke();
     }
 

@@ -19,6 +19,13 @@ public static class DeskflowPorts
     public const int UdpDiscovery = 24812;
 }
 
+public static class DeskflowUsbConstants
+{
+    public const string WinUsbIp = "10.13.37.2";
+    public const string MacUsbIp = "10.13.37.1";
+    public const int DefaultUsbSpeedMbps = 3200;
+}
+
 public enum DeskflowMsgType : byte
 {
     Hello = 0x01,

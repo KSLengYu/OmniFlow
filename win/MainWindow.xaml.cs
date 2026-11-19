@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
@@ -33,6 +34,9 @@ public partial class MainWindow : Window
     private string _lastTrustedPeersSignature = "";
     private string _selectedDirectionTab = "mac_to_win";
     private string _lastReceivedSignature = "";
+    private string _lastRenderedUsbLogs = "";
+    private readonly ConcurrentQueue<string> _diskLogQueue = new();
+    private int _diskLogDraining;
     private bool _lastLangEn;
     private bool _ready;
     private bool _explicitExit;
@@ -474,8 +478,16 @@ public partial class MainWindow : Window
             UsbTrafficCardSub.Text = liveUsbNic?.RttMs != null
                 ? AppLoc.T($"当前延迟 {liveUsbNic.RttMs.Value:F2} ms", $"RTT {liveUsbNic.RttMs.Value:F2} ms")
                 : AppLoc.T("暂未连接", "Not handshaked");
-            UsbLogBox.Text = string.Join(Environment.NewLine, _service.UsbLogs.TakeLast(30));
-            UsbLogBox.ScrollToEnd();
+            if (UsbLogBox.IsVisible)
+            {
+                string nextUsbText = string.Join(Environment.NewLine, _service.UsbLogs.TakeLast(30));
+                if (!string.Equals(nextUsbText, _lastRenderedUsbLogs, StringComparison.Ordinal))
+                {
+                    _lastRenderedUsbLogs = nextUsbText;
+                    UsbLogBox.Text = nextUsbText;
+                    UsbLogBox.ScrollToEnd();
+                }
+            }
         }
         finally
         {
@@ -1292,28 +1304,62 @@ public partial class MainWindow : Window
 
     private void AppendLog(string msg)
     {
+        string line = $"[{DateTime.Now:HH:mm:ss}] {msg}";
+        _diskLogQueue.Enqueue(line);
+        DrainDiskLogAsync();
+
         Dispatcher.BeginInvoke(() =>
         {
-            string line = $"[{DateTime.Now:HH:mm:ss}] {msg}";
             if (LogBox.Text.Length > 24000)
             {
                 LogBox.Text = LogBox.Text[^16000..];
             }
             LogBox.AppendText(line + Environment.NewLine);
-            LogBox.ScrollToEnd();
+            if (LogBox.IsVisible)
+            {
+                LogBox.ScrollToEnd();
+            }
+        });
+    }
+
+    private void DrainDiskLogAsync()
+    {
+        if (System.Threading.Interlocked.CompareExchange(ref _diskLogDraining, 1, 0) != 0) return;
+        _ = System.Threading.Tasks.Task.Run(() =>
+        {
+            var sb = new System.Text.StringBuilder();
             try
             {
-                string logPath = OmniFlowPaths.RuntimeLogPath;
-                if (File.Exists(logPath) && new FileInfo(logPath).Length > 2 * 1024 * 1024)
+                while (true)
                 {
-                    File.WriteAllText(logPath, line + Environment.NewLine);
-                }
-                else
-                {
-                    File.AppendAllText(logPath, line + Environment.NewLine);
+                    sb.Clear();
+                    int count = 0;
+                    while (count < 256 && _diskLogQueue.TryDequeue(out string? item))
+                    {
+                        sb.AppendLine(item);
+                        count++;
+                    }
+                    if (sb.Length > 0)
+                    {
+                        try
+                        {
+                            string logPath = OmniFlowPaths.RuntimeLogPath;
+                            if (File.Exists(logPath) && new FileInfo(logPath).Length > 2 * 1024 * 1024)
+                                File.WriteAllText(logPath, sb.ToString());
+                            else
+                                File.AppendAllText(logPath, sb.ToString());
+                        }
+                        catch { }
+                    }
+                    System.Threading.Interlocked.Exchange(ref _diskLogDraining, 0);
+                    if (_diskLogQueue.IsEmpty) break;
+                    if (System.Threading.Interlocked.CompareExchange(ref _diskLogDraining, 1, 0) != 0) break;
                 }
             }
-            catch { }
+            catch
+            {
+                System.Threading.Interlocked.Exchange(ref _diskLogDraining, 0);
+            }
         });
     }
 

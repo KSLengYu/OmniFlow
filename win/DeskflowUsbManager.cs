@@ -17,19 +17,34 @@ public sealed partial class DeskflowService
     }
 
     private int _usbOpSeq = 0;
+    private int _usbProbeInFlight = 0;
     private bool _pendingRestoreComplete = false;
     private DateTime _suppressUsbIdleProbeHeadlineUntilUtc = DateTime.MinValue;
+    private long _lastUsbStatUiMs = 0;
+    private long _lastUsbStatRx = -1;
+    private long _lastUsbStatTx = -1;
 
     private void StartUsbHardwareProbeLoop()
     {
         _usbProbeTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(1300) };
         _usbProbeTimer.Tick += async (_, _) =>
         {
-            var probe = await Task.Run(() =>
+            if (UsbStateTone is "stopping" or "completing") return;
+            if (System.Threading.Interlocked.CompareExchange(ref _usbProbeInFlight, 1, 0) != 0) return;
+            UsbAppleStatus probe;
+            try
             {
-                DeskflowTransport.RefreshLocalNicCacheSync();
-                return UsbProbe.DetectAppleNcm();
-            });
+                probe = await Task.Run(() =>
+                {
+                    DeskflowTransport.RefreshLocalNicCacheSync();
+                    return UsbProbe.DetectAppleNcm();
+                });
+            }
+            finally
+            {
+                System.Threading.Interlocked.Exchange(ref _usbProbeInFlight, 0);
+            }
+            if (UsbStateTone is "stopping" or "completing") return;
             UsbHardwareDetected = probe.Detected;
             if (probe.Detected)
             {
@@ -165,6 +180,25 @@ public sealed partial class DeskflowService
 
     private void HandleUsbEngineOutputLine(string line)
     {
+        if (line.StartsWith("[STAT]", StringComparison.OrdinalIgnoreCase))
+        {
+            var mRx = System.Text.RegularExpressions.Regex.Match(line, @"(?:rx|RX_frames)=(\d+)");
+            var mTx = System.Text.RegularExpressions.Regex.Match(line, @"(?:tx|TX_frames)=(\d+)");
+            if (mRx.Success && long.TryParse(mRx.Groups[1].Value, out long rx)) UsbRxPackets = rx;
+            if (mTx.Success && long.TryParse(mTx.Groups[1].Value, out long tx)) UsbTxPackets = tx;
+
+            long nowMs = Environment.TickCount64;
+            if (nowMs - _lastUsbStatUiMs >= 450 &&
+                (UsbRxPackets != _lastUsbStatRx || UsbTxPackets != _lastUsbStatTx))
+            {
+                _lastUsbStatUiMs = nowMs;
+                _lastUsbStatRx = UsbRxPackets;
+                _lastUsbStatTx = UsbTxPackets;
+                StateUpdated?.Invoke();
+            }
+            return;
+        }
+
         AppendUsbLog(line);
         if (!UsbProcessRunning || UsbStateTone is "stopping" or "completing")
         {
@@ -200,13 +234,6 @@ public sealed partial class DeskflowService
             Transport.AddManualPeerIp(DeskflowUsbConstants.MacUsbIp);
             RefreshNicChannels(DeskflowUsbConstants.WinUsbIp, DeskflowUsbConstants.MacUsbIp, UsbSpeedMbps > 0 ? UsbSpeedMbps : DeskflowUsbConstants.DefaultUsbSpeedMbps);
         }
-        else if (line.StartsWith("[STAT]", StringComparison.OrdinalIgnoreCase))
-        {
-            var mRx = System.Text.RegularExpressions.Regex.Match(line, @"rx=(\d+)");
-            var mTx = System.Text.RegularExpressions.Regex.Match(line, @"tx=(\d+)");
-            if (mRx.Success && long.TryParse(mRx.Groups[1].Value, out long rx)) UsbRxPackets = rx;
-            if (mTx.Success && long.TryParse(mTx.Groups[1].Value, out long tx)) UsbTxPackets = tx;
-        }
         else if (line.Contains("[FATAL]", StringComparison.OrdinalIgnoreCase) || line.Contains("[ERR]", StringComparison.OrdinalIgnoreCase))
         {
             UsbActionBusy = false;
@@ -225,7 +252,6 @@ public sealed partial class DeskflowService
 
         // Immediately drop USB transport links & failover to Ethernet/LAN BEFORE tearing down Wintun/WinUSB so KVM/transfers never stall!
         Transport.DisconnectChannel("USB-C NCM", DeskflowUsbConstants.WinUsbIp);
-        Transport.EnsureLanLinksConnected();
 
         UsbProcessRunning = false;
         UsbActionBusy = true;
@@ -329,14 +355,14 @@ public sealed partial class DeskflowService
                 if (System.Threading.EventWaitHandle.TryOpenExisting($"Local\\MacBridgeStop_{p.Id}", out var stopEv))
                 {
                     using (stopEv) { stopEv.Set(); }
-                    if (p.WaitForExit(2500)) return;
+                    if (p.WaitForExit(1400)) return;
                 }
             }
             catch { }
             if (!p.HasExited)
             {
                 p.Kill(entireProcessTree: true);
-                p.WaitForExit(2000);
+                p.WaitForExit(1200);
             }
         }
         catch { }
@@ -370,8 +396,8 @@ public sealed partial class DeskflowService
                     UseShellExecute = false,
                     CreateNoWindow = true,
                     WindowStyle = System.Diagnostics.ProcessWindowStyle.Hidden,
-                    RedirectStandardOutput = true,
-                    RedirectStandardError = true
+                    RedirectStandardOutput = false,
+                    RedirectStandardError = false
                 };
                 using var proc = System.Diagnostics.Process.Start(psi);
                 proc?.WaitForExit(8000);

@@ -30,7 +30,8 @@ public sealed partial class DeskflowService : IDisposable
     public bool EdgeSwitchEnabled { get; set; } = true;
     public bool HotkeySwitchEnabled { get; set; } = true;
     public bool ClipboardSyncEnabled { get; set; } = true;
-    public bool RemoteFocusActive { get; set; }
+    private volatile bool _remoteFocusActive;
+    public bool RemoteFocusActive { get => _remoteFocusActive; set => _remoteFocusActive = value; }
     public string ManualPeerIp { get; set; } = "";
     public string? SelectedMonitorId { get; set; }
 
@@ -45,7 +46,8 @@ public sealed partial class DeskflowService : IDisposable
 
     public List<NicChannelItem> NicChannels { get; private set; } = new();
     public ObservableCollection<NicChannelItem> NicChannelsView { get; } = new();
-    public List<IndependentMonitorItem> Monitors { get; private set; } = new();
+    private volatile List<IndependentMonitorItem> _monitors = new();
+    public List<IndependentMonitorItem> Monitors { get => _monitors; private set => _monitors = value; }
     public ObservableCollection<ShelfTransferItem> ShelfItems { get; } = new();
     public List<ReceivedFileRecord> ReceivedFiles { get; } = new();
     public List<SemanticHotkeyItem> HotkeyRules { get; } = new()
@@ -80,7 +82,7 @@ public sealed partial class DeskflowService : IDisposable
     private string _lastRemoteClipboardFileSig = "";
     private DateTime _suppressClipboardUntilUtc = DateTime.MinValue;
     private List<WireMonitorDto> _peerMonitors = new();
-    private List<WireMonitorDto> _localMonitors = new();
+    private volatile List<WireMonitorDto> _localMonitors = new();
     private readonly Dictionary<string, (double X, double Y)> _syncedPositions = new();
     private readonly HashSet<string> _disabledMultipathIfaces = new(StringComparer.OrdinalIgnoreCase);
     private string? _lastRecommendedControlKey;
@@ -1186,8 +1188,7 @@ public sealed partial class DeskflowService : IDisposable
                 SetRemoteFocus(false, broadcastToPeer: false);
         }
         catch { }
-        if (_mouseHook != IntPtr.Zero) { UnhookWindowsHookEx(_mouseHook); _mouseHook = IntPtr.Zero; }
-        if (_kbdHook != IntPtr.Zero) { UnhookWindowsHookEx(_kbdHook); _kbdHook = IntPtr.Zero; }
+        ShutdownLowLevelHooks();
         _clipboardTimer?.Stop();
         _topologySyncTimer?.Stop();
         _usbProbeTimer?.Stop();

@@ -203,32 +203,42 @@ public sealed partial class DeskflowService
 
     private WireMonitorDto? FindMonitorForPoint(int px, int py)
     {
-        if (_localMonitors.Count == 0) _localMonitors = DeskflowTransport.EnumerateRealWindowsMonitors();
-        for (int i = 0; i < _localMonitors.Count; i++)
+        var localMons = _localMonitors;
+        if (localMons.Count == 0)
         {
-            var m = _localMonitors[i];
+            localMons = DeskflowTransport.EnumerateRealWindowsMonitors();
+            _localMonitors = localMons;
+        }
+        for (int i = 0; i < localMons.Count; i++)
+        {
+            var m = localMons[i];
             if (px >= m.BoundsX - 6 && px <= m.BoundsX + m.WidthPx + 6 &&
                 py >= m.BoundsY - 6 && py <= m.BoundsY + m.HeightPx + 6)
             {
                 return m;
             }
         }
-        return _localMonitors.Count > 0 ? _localMonitors[0] : null;
+        return localMons.Count > 0 ? localMons[0] : null;
     }
 
     private (int centerX, int centerY) GetPrimaryCursorCenter()
     {
-        if (_localMonitors.Count == 0) _localMonitors = DeskflowTransport.EnumerateRealWindowsMonitors();
-        WireMonitorDto? primary = null;
-        for (int i = 0; i < _localMonitors.Count; i++)
+        var localMons = _localMonitors;
+        if (localMons.Count == 0)
         {
-            if (_localMonitors[i].IsPrimary)
+            localMons = DeskflowTransport.EnumerateRealWindowsMonitors();
+            _localMonitors = localMons;
+        }
+        WireMonitorDto? primary = null;
+        for (int i = 0; i < localMons.Count; i++)
+        {
+            if (localMons[i].IsPrimary)
             {
-                primary = _localMonitors[i];
+                primary = localMons[i];
                 break;
             }
         }
-        primary ??= _localMonitors.Count > 0 ? _localMonitors[0] : null;
+        primary ??= localMons.Count > 0 ? localMons[0] : null;
         if (primary != null && primary.WidthPx > 0 && primary.HeightPx > 0)
         {
             return (primary.BoundsX + (primary.WidthPx >> 1), primary.BoundsY + (primary.HeightPx >> 1));
@@ -240,10 +250,11 @@ public sealed partial class DeskflowService
 
     private (double refW, double refH) GetActiveMacRefSize()
     {
+        var mons = Monitors;
         IndependentMonitorItem? activeMac = null;
-        for (int i = 0; i < Monitors.Count; i++)
+        for (int i = 0; i < mons.Count; i++)
         {
-            var m = Monitors[i];
+            var m = mons[i];
             if (m.OsKind != "macOS") continue;
             activeMac ??= m;
             if (Math.Max(0, m.DisplayIndex - 1) == _remoteMacMonIdx)
@@ -259,8 +270,14 @@ public sealed partial class DeskflowService
 
     public void InjectMouseMoveAbs(int monitorIndex, double normX, double normY)
     {
-        if (_localMonitors.Count == 0) _localMonitors = DeskflowTransport.EnumerateRealWindowsMonitors();
-        var mon = _localMonitors[Math.Clamp(monitorIndex, 0, _localMonitors.Count - 1)];
+        var localMons = _localMonitors;
+        if (localMons.Count == 0)
+        {
+            localMons = DeskflowTransport.EnumerateRealWindowsMonitors();
+            _localMonitors = localMons;
+        }
+        if (localMons.Count == 0) return;
+        var mon = localMons[Math.Clamp(monitorIndex, 0, localMons.Count - 1)];
 
         double vLeft = GetSystemMetrics(SM_XVIRTUALSCREEN);
         double vTop = GetSystemMetrics(SM_YVIRTUALSCREEN);
@@ -501,6 +518,12 @@ public sealed partial class DeskflowService
     [DllImport("user32.dll", SetLastError = true)] private static extern IntPtr SetWindowsHookEx(int idHook, LowLevelProc lpfn, IntPtr hMod, uint dwThreadId);
     [DllImport("user32.dll", SetLastError = true)] private static extern bool UnhookWindowsHookEx(IntPtr hhk);
     [DllImport("user32.dll")] private static extern IntPtr CallNextHookEx(IntPtr hhk, int nCode, IntPtr wParam, IntPtr lParam);
+    [DllImport("user32.dll")] private static extern sbyte GetMessage(out MSG lpMsg, IntPtr hWnd, uint wMsgFilterMin, uint wMsgFilterMax);
+    [DllImport("user32.dll")] private static extern bool PeekMessage(out MSG lpMsg, IntPtr hWnd, uint wMsgFilterMin, uint wMsgFilterMax, uint wRemoveMsg);
+    [DllImport("user32.dll")] private static extern bool TranslateMessage(ref MSG lpMsg);
+    [DllImport("user32.dll")] private static extern IntPtr DispatchMessage(ref MSG lpMsg);
+    [DllImport("user32.dll", SetLastError = true)] private static extern bool PostThreadMessage(uint idThread, uint Msg, IntPtr wParam, IntPtr lParam);
+    [DllImport("kernel32.dll")] private static extern uint GetCurrentThreadId();
     [DllImport("user32.dll")] private static extern short GetAsyncKeyState(int vKey);
     [DllImport("user32.dll")] private static extern IntPtr WindowFromPoint(POINT Point);
     [DllImport("user32.dll", SetLastError = true)] private static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint lpdwProcessId);
@@ -523,6 +546,19 @@ public sealed partial class DeskflowService
     private const int WM_MOUSEHWHEEL = 0x020E;
     private const uint LLKHF_INJECTED = 0x10;
     private const uint LLMHF_INJECTED = 0x01;
+    private const uint WM_QUIT = 0x0012;
+    private const uint PM_NOREMOVE = 0x0000;
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct MSG
+    {
+        public IntPtr hwnd;
+        public uint message;
+        public IntPtr wParam;
+        public IntPtr lParam;
+        public uint time;
+        public POINT pt;
+    }
 
     [StructLayout(LayoutKind.Sequential)]
     private struct POINT { public int x; public int y; }
@@ -549,8 +585,10 @@ public sealed partial class DeskflowService
 
     private LowLevelProc? _mouseProc;
     private LowLevelProc? _kbdProc;
-    private IntPtr _mouseHook = IntPtr.Zero;
-    private IntPtr _kbdHook = IntPtr.Zero;
+    private volatile IntPtr _mouseHook = IntPtr.Zero;
+    private volatile IntPtr _kbdHook = IntPtr.Zero;
+    private uint _hookThreadId;
+    private Thread? _hookThread;
     private DateTime _lastEdgeSwitchTime = DateTime.MinValue;
     private DateTime _suppressEdgeCrossUntilUtc = DateTime.MinValue;
     private int _remoteMacMonIdx = 0;
@@ -583,21 +621,65 @@ public sealed partial class DeskflowService
 
     private void InstallLowLevelHooks()
     {
-        try
+        if (_hookThread != null) return;
+        _mouseProc = MouseHookCallback;
+        _kbdProc = KeyboardHookCallback;
+        using var ready = new ManualResetEventSlim(false);
+        _hookThread = new Thread(() =>
         {
-            _mouseProc = MouseHookCallback;
-            _kbdProc = KeyboardHookCallback;
-            IntPtr hMod = GetModuleHandle(null);
-            _mouseHook = SetWindowsHookEx(WH_MOUSE_LL, _mouseProc, hMod, 0);
-            _kbdHook = SetWindowsHookEx(WH_KEYBOARD_LL, _kbdProc, hMod, 0);
-            if (_mouseHook == IntPtr.Zero || _kbdHook == IntPtr.Zero)
+            try
             {
-                LogMessage?.Invoke($"[KVM Warn] 底层键鼠钩子注册异常 (mouse={_mouseHook}, kbd={_kbdHook}, err={Marshal.GetLastWin32Error()})");
+                // Ensure a Win32 message queue exists on this dedicated hook thread before publishing thread ID
+                PeekMessage(out _, IntPtr.Zero, 0, 0, PM_NOREMOVE);
+                Volatile.Write(ref _hookThreadId, GetCurrentThreadId());
+
+                IntPtr hMod = GetModuleHandle(null);
+                _mouseHook = SetWindowsHookEx(WH_MOUSE_LL, _mouseProc, hMod, 0);
+                _kbdHook = SetWindowsHookEx(WH_KEYBOARD_LL, _kbdProc, hMod, 0);
+                if (_mouseHook == IntPtr.Zero || _kbdHook == IntPtr.Zero)
+                {
+                    LogMessage?.Invoke($"[KVM Warn] 底层键鼠钩子注册异常 (mouse={_mouseHook}, kbd={_kbdHook}, err={Marshal.GetLastWin32Error()})");
+                }
             }
-        }
-        catch (Exception ex)
+            catch (Exception ex)
+            {
+                LogMessage?.Invoke($"[KVM Warn] 底层键鼠钩子异常: {ex.Message}");
+            }
+            finally
+            {
+                ready.Set();
+            }
+
+            while (!_kvmShuttingDown && GetMessage(out MSG msg, IntPtr.Zero, 0, 0) > 0)
+            {
+                TranslateMessage(ref msg);
+                DispatchMessage(ref msg);
+            }
+
+            IntPtr mh = Interlocked.Exchange(ref _mouseHook, IntPtr.Zero);
+            if (mh != IntPtr.Zero) UnhookWindowsHookEx(mh);
+            IntPtr kh = Interlocked.Exchange(ref _kbdHook, IntPtr.Zero);
+            if (kh != IntPtr.Zero) UnhookWindowsHookEx(kh);
+        })
         {
-            LogMessage?.Invoke($"[KVM Warn] 底层键鼠钩子异常: {ex.Message}");
+            IsBackground = true,
+            Priority = ThreadPriority.Highest,
+            Name = "OmniFlow-KvmHooks"
+        };
+        _hookThread.Start();
+        ready.Wait(1000);
+    }
+
+    private void ShutdownLowLevelHooks()
+    {
+        IntPtr mh = Interlocked.Exchange(ref _mouseHook, IntPtr.Zero);
+        if (mh != IntPtr.Zero) UnhookWindowsHookEx(mh);
+        IntPtr kh = Interlocked.Exchange(ref _kbdHook, IntPtr.Zero);
+        if (kh != IntPtr.Zero) UnhookWindowsHookEx(kh);
+        uint tid = Volatile.Read(ref _hookThreadId);
+        if (tid != 0)
+        {
+            PostThreadMessage(tid, WM_QUIT, IntPtr.Zero, IntPtr.Zero);
         }
     }
 
@@ -978,11 +1060,12 @@ public sealed partial class DeskflowService
         bool verticalEdge,
         bool neighborEndsAtEdge)
     {
+        var mons = Monitors;
         IndependentMonitorItem? best = null;
         double bestGap = double.MaxValue;
-        for (int i = 0; i < Monitors.Count; i++)
+        for (int i = 0; i < mons.Count; i++)
         {
-            var c = Monitors[i];
+            var c = mons[i];
             if (c.OsKind != targetOsKind) continue;
             double candEdge = verticalEdge
                 ? (neighborEndsAtEdge ? c.CanvasX + c.AspectWidth : c.CanvasX)
@@ -1003,11 +1086,12 @@ public sealed partial class DeskflowService
 
     private (int winMonIdx, double normX, double normY)? DetectReturnCrossingToWindows(double normX, double normY, double dx, double dy)
     {
+        var mons = Monitors;
         IndependentMonitorItem? activeMac = null;
         bool hasWin = false;
-        for (int i = 0; i < Monitors.Count; i++)
+        for (int i = 0; i < mons.Count; i++)
         {
-            var m = Monitors[i];
+            var m = mons[i];
             if (m.OsKind == "Windows")
             {
                 hasWin = true;
@@ -1108,23 +1192,29 @@ public sealed partial class DeskflowService
 
     private (int macMonIdx, double normX, double normY)? Detect2DEdgeToMac(int px, int py, int tolerance = 5)
     {
-        if (_localMonitors.Count == 0) _localMonitors = DeskflowTransport.EnumerateRealWindowsMonitors();
-        int wIdx = _localMonitors.FindIndex(m => px >= m.BoundsX - 6 && px <= m.BoundsX + m.WidthPx + 6 && py >= m.BoundsY - 6 && py <= m.BoundsY + m.HeightPx + 6);
+        var localMons = _localMonitors;
+        if (localMons.Count == 0)
+        {
+            localMons = DeskflowTransport.EnumerateRealWindowsMonitors();
+            _localMonitors = localMons;
+        }
+        int wIdx = localMons.FindIndex(m => px >= m.BoundsX - 6 && px <= m.BoundsX + m.WidthPx + 6 && py >= m.BoundsY - 6 && py <= m.BoundsY + m.HeightPx + 6);
         if (wIdx < 0) wIdx = 0;
-        if (wIdx >= _localMonitors.Count) return null;
+        if (wIdx >= localMons.Count) return null;
 
-        var lm = _localMonitors[wIdx];
+        var lm = localMons[wIdx];
         bool atLeft = px <= lm.BoundsX + tolerance;
         bool atRight = px >= lm.BoundsX + lm.WidthPx - tolerance;
         bool atTop = py <= lm.BoundsY + tolerance;
         bool atBottom = py >= lm.BoundsY + lm.HeightPx - tolerance;
         if (!atLeft && !atRight && !atTop && !atBottom) return null;
 
+        var mons = Monitors;
         IndependentMonitorItem? winNode = null;
         bool hasMac = false;
-        for (int i = 0; i < Monitors.Count; i++)
+        for (int i = 0; i < mons.Count; i++)
         {
-            var m = Monitors[i];
+            var m = mons[i];
             if (m.OsKind == "Windows" && m.DisplayIndex == lm.DisplayIndex) winNode ??= m;
             else if (m.OsKind == "macOS") hasMac = true;
         }

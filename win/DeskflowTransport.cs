@@ -303,7 +303,7 @@ public sealed partial class DeskflowTransport : IDisposable
         foreach (var ip in _knownPeerIps.Keys)
         {
             if (!IsUsbBridgeIp(ip))
-                _ = ConnectIfNeededAsync(ip, null, isUsb: false);
+                _ = Task.Run(() => ConnectIfNeededAsync(ip, null, isUsb: false));
         }
     }
 
@@ -557,7 +557,9 @@ public sealed partial class DeskflowTransport : IDisposable
     {
         if (_manuallyPausedAll) return;
         if (isUsb && !IsUsbBridgeIp(peerIp)) return;
-        var localNics = EnumerateLocalIPv4();
+        // Run NIC enumeration and socket setup on thread pool so callers (e.g. WPF UI) never block
+        await Task.Yield();
+        var localNics = await Task.Run(EnumerateLocalIPv4);
         string[] peerParts = peerIp.Split('.');
         List<LocalNicInfo> matching = new();
         if (localIpHint != null)
@@ -1139,8 +1141,15 @@ public sealed partial class DeskflowTransport : IDisposable
         }
         if (snap.Count == 0)
         {
-            // Seed initial snapshot once; subsequent refreshes always run off the UI thread
-            snap = RefreshLocalNicCacheSync();
+            // Never stall an STA (WPF UI) thread on synchronous NDIS/IPHelper queries during adapter teardown
+            if (Thread.CurrentThread.GetApartmentState() == ApartmentState.STA)
+            {
+                RefreshLocalNicCacheAsync();
+            }
+            else
+            {
+                snap = RefreshLocalNicCacheSync();
+            }
         }
         else if (needAsyncRefresh)
         {

@@ -21,6 +21,9 @@ final class MacKvmController {
     private var parkedCursorPoint: CGPoint?
     private var bgCursorEnabled = false
     private var axPollTimer: Timer?
+    private var cachedKvmEnabled: Bool = true
+    private var cachedControlMode: KvmControlMode = .dualActive
+    private var isRemoteFocusActive: Bool = false
     private var lastModifierFlags: CGEventFlags = []
     private var dragStartPasteboardCount: Int = -1
     private var isHoveringEdgeWithFile: Bool = false
@@ -154,7 +157,7 @@ final class MacKvmController {
         CFRunLoopAddSource(CFRunLoopGetMain(), src, .commonModes)
         CGEvent.tapEnable(tap: validTap, enable: true)
         startMultitouchTrackpadMonitor()
-        syncInjectorState(kvmEnabled: DeskflowEngine.shared.kvmEnabled, controlMode: DeskflowEngine.shared.kvmControlMode)
+        syncInjectorState(kvmEnabled: cachedKvmEnabled, controlMode: cachedControlMode)
         RemoteCursorInjector.shared.setTimingLogger { [weak self] msg in
             Task { @MainActor [weak self] in
                 self?.onLog?(msg)
@@ -164,9 +167,11 @@ final class MacKvmController {
     }
 
     func stopTap() {
-        setRemoteFocus(false)
+        if isRemoteFocusActive {
+            setRemoteFocus(false)
+        }
         stopMultitouchTrackpadMonitor()
-        syncInjectorState(kvmEnabled: false, controlMode: DeskflowEngine.shared.kvmControlMode)
+        syncInjectorState(kvmEnabled: false, controlMode: cachedControlMode)
         if let src = runLoopSource {
             CFRunLoopRemoveSource(CFRunLoopGetMain(), src, .commonModes)
             runLoopSource = nil
@@ -193,6 +198,8 @@ final class MacKvmController {
     }
 
     func syncInjectorState(kvmEnabled: Bool, controlMode: KvmControlMode) {
+        cachedKvmEnabled = kvmEnabled
+        cachedControlMode = controlMode
         let allowed = kvmEnabled && controlMode != .macMasterOnly
         var list: [CGRect] = []
         list.reserveCapacity(NSScreen.screens.count)
@@ -227,6 +234,7 @@ final class MacKvmController {
         focusEpochAtSwitch: UInt64? = nil,
         returnWarpPoint: CGPoint? = nil
     ) {
+        isRemoteFocusActive = remote
         let engine = DeskflowEngine.shared
         if remote {
             MultitouchBridge.shared.isRemoteFocus = true
@@ -931,8 +939,7 @@ final class MacKvmController {
     // MARK: - Inject Incoming Windows -> Mac KVM Events (Tagged to avoid bounce-back)
 
     func injectMouseMoveAbs(monitorIdx: Int, normX: Double, normY: Double) {
-        let engine = DeskflowEngine.shared
-        syncInjectorState(kvmEnabled: engine.kvmEnabled, controlMode: engine.kvmControlMode)
+        syncInjectorState(kvmEnabled: cachedKvmEnabled, controlMode: cachedControlMode)
         RemoteCursorInjector.shared.injectMouseMoveAbs(monitorIdx: monitorIdx, normX: normX, normY: normY)
     }
 

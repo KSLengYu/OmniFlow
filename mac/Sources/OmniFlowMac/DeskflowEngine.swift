@@ -365,10 +365,11 @@ final class DeskflowEngine: ObservableObject {
         refreshIndependentDisplays()
         startClipboardAndHotkeyWatchers()
 
-        MacKvmController.shared.ensureTapWatcherStarted()
+        MacKvmController.shared.syncInjectorState(kvmEnabled: kvmEnabled, controlMode: kvmControlMode)
 
         DispatchQueue.main.async { [weak self] in
             guard let self = self else { return }
+            MacKvmController.shared.ensureTapWatcherStarted()
             PortalOverlayController.shared.bind(engine: self)
         }
     }

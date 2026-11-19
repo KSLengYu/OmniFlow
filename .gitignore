@@ -1,0 +1,59 @@
+# macOS / Xcode / SwiftPM
+.DS_Store
+.AppleDouble
+.LSOverride
+*.swp
+*~
+mac/.build/
+mac/.swiftpm/
+.build/
+DerivedData/
+*.dSYM/
+*.dSYM
+
+# Windows / .NET / Visual Studio
+win/bin/
+win/obj/
+win/pub_staging/
+win/.vs/
+win/*.user
+win/*.suo
+bin/
+obj/
+pub_staging/
+
+# Compiled binaries & installers
+*.exe
+*.dll
+*.pdb
+*.app/
+*.dmg
+*.pkg
+*.zip
+*.tar.gz
+usb_core/*.exe
+usb_core/*.dll
+usb_core/*.o
+usb_core/*.obj
+
+# Local certificates, keys, secrets, logs & runtime data
+*.pfx
+*.p12
+*.pem
+*.key
+*.crt
+*.cer
+*.log
+settings.json
+trusted_peers.json
+logs/
+
+# Build & installer outputs
+installer/build/
+dist/
+*.pkg
+
+# Editor / IDE caches
+.vscode/
+.idea/
+*.iml

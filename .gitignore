@@ -6,6 +6,8 @@
 *~
 mac/.build/
 mac/.swiftpm/
+installer/mac/OmniFlowInstaller/.build/
+installer/mac/OmniFlowInstaller/.swiftpm/
 .build/
 DerivedData/
 *.dSYM/

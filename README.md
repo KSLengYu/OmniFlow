@@ -11,8 +11,8 @@ macOS 与 Windows 跨设备协同工具（统一 SwiftUI / WPF 界面）：支�
 - `usb_core/` — Windows USB-C NCM / WinUSB 隧道与驱动恢复核心（C 源码）
   - `omniflow_usb.c`、`restore_helper.h`
 - `installer/` — 轻量化双端安装器构建脚本与原生安装器源码
-  - `mac/build_mac_installer.sh`（自动识别 Apple Silicon `arm64` / Intel `x86_64` 的 `.pkg` 安装器）
-  - `win/omniflow_setup.cpp`、`win/build_win_installer.ps1`（独立 Win32 GUI 安装器 + 卸载程序）
+  - `mac/OmniFlowInstaller/` & `mac/build_mac_installer.sh`（通用 `.dmg` 安装向导 `OmniFlow Installer.app`，自动识别 Apple Silicon `arm64` / Intel `x86_64` 并支持覆盖/卸载）
+  - `win/omniflow_setup.cpp`、`win/build_win_installer.ps1`（独立 Win32/GDI+ 深色圆角 GUI 安装器 + 卸载程序）
 
 ## 核心特性
 
@@ -62,7 +62,7 @@ dotnet build -c Release
 
 ## 构建轻量安装包（输出至 `dist/`）
 
-### macOS 安装器（自动区分 Apple Silicon / Intel）
+### macOS 安装器（生成 `OmniFlow-macOS-Installer.dmg`，自动区分 Apple Silicon / Intel）
 
 ```bash
 ./installer/mac/build_mac_installer.sh

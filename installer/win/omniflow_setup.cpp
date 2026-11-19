@@ -27,20 +27,21 @@
 #define DWMWA_USE_IMMUTABLE_DARK_MODE 20
 #endif
 
+#ifndef CLEARTYPE_NATURAL_QUALITY
+#define CLEARTYPE_NATURAL_QUALITY 6
+#endif
+
 static const int IDR_MANIFEST_ID = 1;
 static const int IDI_APP_ICON    = 101;
 static const int IDR_AVATAR_JPG  = 102;
 static const int IDR_PAYLOAD_CAB = 103;
 
-static const wchar_t* GITHUB_URL = L"https://github.com/KSLengYu";
+static const wchar_t* GITHUB_URL = L"https://github.com/KSLengYu/OmniFlow";
 static const wchar_t* DOTNET10_DL_URL = L"https://dotnet.microsoft.com/en-us/download/dotnet/10.0";
 
 enum CtrlId {
     IDC_PATH_EDIT = 1001,
     IDC_BROWSE_BTN = 1002,
-    IDC_CHK_DESKTOP = 1003,
-    IDC_CHK_LAUNCH = 1004,
-    IDC_PROGRESS = 1005,
     IDC_INSTALL_BTN = 1006,
     IDC_DOTNET_BTN = 1007
 };
@@ -53,20 +54,11 @@ struct AppState {
     HWND hwnd = nullptr;
     HWND pathEdit = nullptr;
     HWND browseBtn = nullptr;
-    HWND chkDesktop = nullptr;
-    HWND chkLaunch = nullptr;
-    HWND progressBar = nullptr;
     HWND installBtn = nullptr;
     HWND dotnetBtn = nullptr;
 
-    HFONT fontTitle = nullptr;
-    HFONT fontSub = nullptr;
-    HFONT fontBold = nullptr;
-    HFONT fontNormal = nullptr;
-    HFONT fontMono = nullptr;
-
+    HFONT fontEdit = nullptr;
     HBRUSH brBg = nullptr;
-    HBRUSH brCard = nullptr;
     HBRUSH brEdit = nullptr;
 
     Gdiplus::Image* avatarImg = nullptr;
@@ -78,6 +70,7 @@ struct AppState {
     bool installedOk = false;
     bool launchOnExit = true;
     bool createDesktopShortcut = true;
+    int progressPct = 0;
     int dpi = 96;
 
     std::wstring authorName = L"\u695E\u5B87"; // "楞宇"
@@ -88,7 +81,10 @@ struct AppState {
     RECT rcLangZh{};
     RECT rcLangEn{};
     RECT rcAuthorCard{};
+    RECT rcChkDesktop{};
+    RECT rcChkLaunch{};
     bool hoverAuthor = false;
+    int hoverBtnId = 0;
 };
 
 static AppState g;
@@ -97,14 +93,8 @@ static inline int S(int px) {
     return MulDiv(px, g.dpi, 96);
 }
 
-static void ClearThemeForDarkText(HWND ctrl) {
-    HMODULE hUx = LoadLibraryW(L"uxtheme.dll");
-    if (!hUx) return;
-    typedef HRESULT(WINAPI* PFN_SetWindowTheme)(HWND, LPCWSTR, LPCWSTR);
-    if (auto fn = (PFN_SetWindowTheme)GetProcAddress(hUx, "SetWindowTheme")) {
-        fn(ctrl, L"", L"");
-    }
-    FreeLibrary(hUx);
+static inline float SF(float px) {
+    return px * (float)g.dpi / 96.0f;
 }
 
 static inline std::wstring T(const wchar_t* zh, const wchar_t* en) {
@@ -162,7 +152,6 @@ static bool CheckDotNet10DesktopRuntime() {
         return true;
     }
 
-    // Also check dotnet --list-runtimes fallback via registry or environment
     wchar_t dotnetRoot[MAX_PATH]{};
     DWORD n = GetEnvironmentVariableW(L"DOTNET_ROOT", dotnetRoot, MAX_PATH);
     if (n > 0 && n < MAX_PATH) {
@@ -199,7 +188,6 @@ static DWORD WINAPI GitHubSyncThread(LPVOID) {
                         if (!WinHttpReadData(hReq, buf, chunk, &readBytes) || readBytes == 0) break;
                         body.append(buf, readBytes);
                     }
-                    // Extract "name":"..." field simply & safely
                     size_t pos = body.find("\"name\"");
                     if (pos != std::string::npos) {
                         size_t colon = body.find(':', pos + 6);
@@ -333,7 +321,6 @@ static DWORD WINAPI InstallWorkerThread(LPVOID param) {
         PostMessageW(g.hwnd, WM_INSTALL_DONE, 0, (LPARAM)(new std::wstring(msg)));
     };
 
-    // 1. Stop any running OmniFlow instances cleanly
     PostMessageW(g.hwnd, WM_INSTALL_PROGRESS, 12, 0);
     {
         STARTUPINFOW si{};
@@ -356,7 +343,6 @@ static DWORD WINAPI InstallWorkerThread(LPVOID param) {
         Sleep(250);
     }
 
-    // 2. Ensure directory
     EnsureDirectoryRecursive(destDir);
     if (GetFileAttributesW(destDir.c_str()) == INVALID_FILE_ATTRIBUTES) {
         reportFail(T(L"\u65E0\u6CD5\u521B\u5EFA\u5B89\u88C5\u76EE\u5F55", L"Failed to create target directory."));
@@ -364,7 +350,6 @@ static DWORD WINAPI InstallWorkerThread(LPVOID param) {
         return 0;
     }
 
-    // 3. Extract embedded LZX CAB payload using Windows SetupAPI
     PostMessageW(g.hwnd, WM_INSTALL_PROGRESS, 22, 0);
     if (!ExtractCabToDir(destDir, true)) {
         reportFail(T(L"\u89E3\u538B\u5B89\u88C5\u6587\u4EF6\u5931\u8D25\uFF0C\u8BF7\u68C0\u67E5\u76EE\u5F55\u6743\u9650", L"Failed to extract files. Check directory permissions."));
@@ -372,7 +357,6 @@ static DWORD WINAPI InstallWorkerThread(LPVOID param) {
         return 0;
     }
 
-    // 4. Copy self as Uninstall binary & register Apps & Features entry
     PostMessageW(g.hwnd, WM_INSTALL_PROGRESS, 88, 0);
     wchar_t selfExe[MAX_PATH]{};
     GetModuleFileNameW(nullptr, selfExe, MAX_PATH);
@@ -401,7 +385,6 @@ static DWORD WINAPI InstallWorkerThread(LPVOID param) {
         RegCloseKey(hKey);
     }
 
-    // 5. Create Start Menu & optional Desktop shortcuts
     PostMessageW(g.hwnd, WM_INSTALL_PROGRESS, 94, 0);
     wchar_t programsPath[MAX_PATH]{};
     if (SHGetFolderPathW(nullptr, CSIDL_PROGRAMS, nullptr, 0, programsPath) == S_OK) {
@@ -424,35 +407,72 @@ static DWORD WINAPI InstallWorkerThread(LPVOID param) {
     return 0;
 }
 
-static void RefreshUiLanguageStrings() {
-    if (!g.hwnd) return;
-    SetWindowTextW(g.hwnd, T(L"OmniFlow \u5B89\u88C5\u7A0B\u5E8F", L"OmniFlow Setup").c_str());
-    SetWindowTextW(g.browseBtn, T(L"\u6D4F\u89C8...", L"Browse...").c_str());
-    SetWindowTextW(g.chkDesktop, T(L"\u521B\u5EFA\u684C\u9762\u5FEB\u6377\u65B9\u5F0F", L"Create Desktop shortcut").c_str());
-    SetWindowTextW(g.chkLaunch, T(L"\u5B89\u88C5\u540E\u7ACB\u5373\u542F\u52A8 OmniFlow", L"Launch OmniFlow after installation").c_str());
+// --- Modern GDI+ Rounded Helpers & Typography ---
 
-    if (g.installedOk) {
-        SetWindowTextW(g.installBtn, T(L"\u5B8C\u6210", L"Finish").c_str());
-    } else if (g.installing) {
-        SetWindowTextW(g.installBtn, T(L"\u6B63\u5728\u5B89\u88C5...", L"Installing...").c_str());
-    } else {
-        SetWindowTextW(g.installBtn, T(L"\u7ACB\u5373\u5B89\u88C5", L"Install OmniFlow").c_str());
-    }
-
-    if (!g.dotnetReady && g.dotnetBtn) {
-        SetWindowTextW(g.dotnetBtn, T(L"\u4E0B\u8F7D .NET 10", L"Get .NET 10").c_str());
-    }
-    InvalidateRect(g.hwnd, nullptr, TRUE);
+static void AddRoundRectPath(Gdiplus::GraphicsPath& path, Gdiplus::RectF r, float radius) {
+    float d = radius * 2.0f;
+    if (d > r.Width) d = r.Width;
+    if (d > r.Height) d = r.Height;
+    path.AddArc(r.X, r.Y, d, d, 180.0f, 90.0f);
+    path.AddArc(r.X + r.Width - d, r.Y, d, d, 270.0f, 90.0f);
+    path.AddArc(r.X + r.Width - d, r.Y + r.Height - d, d, d, 0.0f, 90.0f);
+    path.AddArc(r.X, r.Y + r.Height - d, d, d, 90.0f, 90.0f);
+    path.CloseFigure();
 }
 
-static void DrawGitHubOctocat(Gdiplus::Graphics& gfx, float x, float y, float sz, Gdiplus::Color col) {
-    // Simple stylized Octocat head+ears silhouette on 24x24 normalized grid + smile accent
+static void FillRoundRect(Gdiplus::Graphics& gfx, Gdiplus::RectF r, float radius, Gdiplus::Color fill) {
+    Gdiplus::GraphicsPath p;
+    AddRoundRectPath(p, r, radius);
+    Gdiplus::SolidBrush br(fill);
+    gfx.FillPath(&br, &p);
+}
+
+static void DrawRoundCard(Gdiplus::Graphics& gfx, Gdiplus::RectF r, float radius, Gdiplus::Color fill, Gdiplus::Color border, float strokeW = 1.0f) {
+    Gdiplus::GraphicsPath p;
+    AddRoundRectPath(p, r, radius);
+    Gdiplus::SolidBrush br(fill);
+    Gdiplus::Pen pen(border, strokeW);
+    gfx.FillPath(&br, &p);
+    gfx.DrawPath(&pen, &p);
+}
+
+static Gdiplus::FontFamily* MakeUiFontFamily() {
+    auto* f = new Gdiplus::FontFamily(L"Microsoft YaHei UI");
+    if (f->IsAvailable()) return f;
+    delete f;
+    f = new Gdiplus::FontFamily(L"Segoe UI");
+    if (f->IsAvailable()) return f;
+    delete f;
+    return Gdiplus::FontFamily::GenericSansSerif()->Clone();
+}
+
+static void DrawTextGdip(
+    Gdiplus::Graphics& gfx,
+    const Gdiplus::FontFamily* ff,
+    const std::wstring& text,
+    float pxSize,
+    INT style,
+    Gdiplus::RectF rect,
+    Gdiplus::Color col,
+    Gdiplus::StringAlignment hAlign = Gdiplus::StringAlignmentNear,
+    Gdiplus::StringAlignment vAlign = Gdiplus::StringAlignmentCenter)
+{
+    Gdiplus::Font font(ff, pxSize, style, Gdiplus::UnitPixel);
+    Gdiplus::SolidBrush br(col);
+    Gdiplus::StringFormat fmt(Gdiplus::StringFormatFlagsNoWrap);
+    fmt.SetAlignment(hAlign);
+    fmt.SetLineAlignment(vAlign);
+    fmt.SetTrimming(Gdiplus::StringTrimmingEllipsisCharacter);
+    gfx.DrawString(text.c_str(), (INT)text.size(), &font, rect, &fmt, &br);
+}
+
+static void DrawGitHubOctocat(Gdiplus::Graphics& gfx, float x, float y, float sz, Gdiplus::Color col, Gdiplus::Color cutout) {
     Gdiplus::SolidBrush br(col);
     Gdiplus::GraphicsPath circlePath;
     circlePath.AddEllipse(x, y, sz, sz);
     gfx.FillPath(&br, &circlePath);
 
-    Gdiplus::SolidBrush inner(Gdiplus::Color(255, 0x22, 0x23, 0x28));
+    Gdiplus::SolidBrush inner(cutout);
     Gdiplus::PointF head[8] = {
         {x + sz * 0.25f, y + sz * 0.30f},
         {x + sz * 0.36f, y + sz * 0.20f},
@@ -468,6 +488,151 @@ static void DrawGitHubOctocat(Gdiplus::Graphics& gfx, float x, float y, float sz
     gfx.FillRectangle(&inner, x + sz * 0.40f, y + sz * 0.66f, sz * 0.20f, sz * 0.30f);
 }
 
+static void DrawOwnerButton(const DRAWITEMSTRUCT* dis) {
+    if (!dis) return;
+    RECT rc = dis->rcItem;
+    int w = rc.right - rc.left;
+    int h = rc.bottom - rc.top;
+    if (w <= 0 || h <= 0) return;
+
+    HDC memDc = CreateCompatibleDC(dis->hDC);
+    HBITMAP memBmp = CreateCompatibleBitmap(dis->hDC, w, h);
+    HGDIOBJ oldBmp = SelectObject(memDc, memBmp);
+
+    Gdiplus::Graphics gfx(memDc);
+    gfx.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
+    gfx.SetTextRenderingHint(Gdiplus::TextRenderingHintClearTypeGridFit);
+
+    bool disabled = (dis->itemState & ODS_DISABLED) != 0;
+    bool pressed = (dis->itemState & ODS_SELECTED) != 0;
+    bool isPrimary = (dis->CtlID == IDC_INSTALL_BTN);
+    bool hovered = (g.hoverBtnId == (int)dis->CtlID) && !disabled;
+
+    // Paint card/window backdrop behind button corners
+    Gdiplus::Color backdrop = (dis->CtlID == IDC_BROWSE_BTN)
+        ? Gdiplus::Color(255, 0x12, 0x17, 0x22)
+        : Gdiplus::Color(255, 0x0B, 0x0E, 0x14);
+    Gdiplus::SolidBrush brBack(backdrop);
+    gfx.FillRectangle(&brBack, 0, 0, w, h);
+
+    Gdiplus::Color fill, border, textCol;
+    if (isPrimary) {
+        if (disabled) {
+            fill = Gdiplus::Color(255, 0x1D, 0x35, 0x62);
+            border = Gdiplus::Color(255, 0x28, 0x45, 0x7A);
+            textCol = Gdiplus::Color(255, 0x94, 0xA3, 0xB8);
+        } else if (pressed) {
+            fill = Gdiplus::Color(255, 0x1D, 0x4E, 0xD8);
+            border = Gdiplus::Color(255, 0x3B, 0x82, 0xF6);
+            textCol = Gdiplus::Color(255, 255, 255, 255);
+        } else if (hovered) {
+            fill = Gdiplus::Color(255, 0x3B, 0x82, 0xF6);
+            border = Gdiplus::Color(255, 0x60, 0xA5, 0xFA);
+            textCol = Gdiplus::Color(255, 255, 255, 255);
+        } else {
+            fill = Gdiplus::Color(255, 0x25, 0x63, 0xEB);
+            border = Gdiplus::Color(255, 0x3B, 0x82, 0xF6);
+            textCol = Gdiplus::Color(255, 255, 255, 255);
+        }
+    } else {
+        if (disabled) {
+            fill = Gdiplus::Color(255, 0x13, 0x18, 0x24);
+            border = Gdiplus::Color(255, 0x1E, 0x29, 0x3B);
+            textCol = Gdiplus::Color(255, 0x64, 0x74, 0x8B);
+        } else if (pressed) {
+            fill = Gdiplus::Color(255, 0x12, 0x1B, 0x2E);
+            border = Gdiplus::Color(255, 0x3B, 0x82, 0xF6);
+            textCol = Gdiplus::Color(255, 0xF8, 0xFA, 0xFC);
+        } else if (hovered) {
+            fill = Gdiplus::Color(255, 0x1E, 0x29, 0x3B);
+            border = Gdiplus::Color(255, 0x47, 0x55, 0x69);
+            textCol = Gdiplus::Color(255, 0xF8, 0xFA, 0xFC);
+        } else {
+            fill = Gdiplus::Color(255, 0x16, 0x1E, 0x2E);
+            border = Gdiplus::Color(255, 0x26, 0x32, 0x48);
+            textCol = Gdiplus::Color(255, 0xCB, 0xD5, 0xE1);
+        }
+    }
+
+    DrawRoundCard(gfx, Gdiplus::RectF(0.5f, 0.5f, (float)w - 1.5f, (float)h - 1.5f), SF(8.0f), fill, border, 1.0f);
+
+    wchar_t buf[128]{};
+    GetWindowTextW(dis->hwndItem, buf, 128);
+    Gdiplus::FontFamily* ff = MakeUiFontFamily();
+    DrawTextGdip(
+        gfx, ff, buf,
+        SF(isPrimary ? 13.5f : 12.5f),
+        isPrimary ? Gdiplus::FontStyleBold : Gdiplus::FontStyleRegular,
+        Gdiplus::RectF(4.0f, 0.0f, (float)w - 8.0f, (float)h),
+        textCol,
+        Gdiplus::StringAlignmentCenter,
+        Gdiplus::StringAlignmentCenter);
+    delete ff;
+
+    BitBlt(dis->hDC, 0, 0, w, h, memDc, 0, 0, SRCCOPY);
+    SelectObject(memDc, oldBmp);
+    DeleteObject(memBmp);
+    DeleteDC(memDc);
+}
+
+static void RefreshUiLanguageStrings() {
+    if (!g.hwnd) return;
+    SetWindowTextW(g.hwnd, T(L"OmniFlow \u5B89\u88C5\u5411\u5BFC", L"OmniFlow Installer").c_str());
+    SetWindowTextW(g.browseBtn, T(L"\u6D4F\u89C8...", L"Browse...").c_str());
+
+    if (g.installedOk) {
+        SetWindowTextW(g.installBtn, T(L"\u5B8C\u6210", L"Finish").c_str());
+    } else if (g.installing) {
+        SetWindowTextW(g.installBtn, T(L"\u6B63\u5728\u5B89\u88C5...", L"Installing...").c_str());
+    } else {
+        SetWindowTextW(g.installBtn, T(L"\u7ACB\u5373\u5B89\u88C5", L"Install OmniFlow").c_str());
+    }
+
+    if (!g.dotnetReady && g.dotnetBtn) {
+        SetWindowTextW(g.dotnetBtn, T(L"\u4E0B\u8F7D .NET 10", L"Get .NET 10").c_str());
+    }
+    InvalidateRect(g.hwnd, nullptr, FALSE);
+    InvalidateRect(g.browseBtn, nullptr, FALSE);
+    InvalidateRect(g.installBtn, nullptr, FALSE);
+    if (g.dotnetBtn) InvalidateRect(g.dotnetBtn, nullptr, FALSE);
+}
+
+static void DrawCheckboxRow(
+    Gdiplus::Graphics& gfx,
+    const Gdiplus::FontFamily* ff,
+    const RECT& rcRow,
+    bool checked,
+    const std::wstring& label)
+{
+    float boxSz = SF(16.0f);
+    float bx = (float)rcRow.left;
+    float by = (float)rcRow.top + ((rcRow.bottom - rcRow.top) - boxSz) * 0.5f;
+    Gdiplus::RectF boxR(bx, by, boxSz, boxSz);
+
+    if (checked) {
+        DrawRoundCard(gfx, boxR, SF(4.5f),
+            Gdiplus::Color(255, 0x25, 0x63, 0xEB),
+            Gdiplus::Color(255, 0x3B, 0x82, 0xF6), 1.0f);
+        Gdiplus::Pen ck(Gdiplus::Color(255, 255, 255, 255), SF(1.8f));
+        ck.SetStartCap(Gdiplus::LineCapRound);
+        ck.SetEndCap(Gdiplus::LineCapRound);
+        ck.SetLineJoin(Gdiplus::LineJoinRound);
+        Gdiplus::PointF pts[3] = {
+            {bx + boxSz * 0.24f, by + boxSz * 0.52f},
+            {bx + boxSz * 0.44f, by + boxSz * 0.72f},
+            {bx + boxSz * 0.77f, by + boxSz * 0.30f}
+        };
+        gfx.DrawLines(&ck, pts, 3);
+    } else {
+        DrawRoundCard(gfx, boxR, SF(4.5f),
+            Gdiplus::Color(255, 0x08, 0x0B, 0x10),
+            Gdiplus::Color(255, 0x33, 0x41, 0x55), 1.2f);
+    }
+
+    Gdiplus::RectF lblR(bx + boxSz + SF(10.0f), (float)rcRow.top, (float)(rcRow.right - rcRow.left) - boxSz - SF(10.0f), (float)(rcRow.bottom - rcRow.top));
+    DrawTextGdip(gfx, ff, label, SF(13.0f), Gdiplus::FontStyleRegular, lblR, Gdiplus::Color(255, 0xE2, 0xE8, 0xF0));
+}
+
 static void PaintWindow(HWND hwnd) {
     PAINTSTRUCT ps{};
     HDC hdc = BeginPaint(hwnd, &ps);
@@ -478,62 +643,66 @@ static void PaintWindow(HWND hwnd) {
     HBITMAP memBmp = CreateCompatibleBitmap(hdc, rc.right, rc.bottom);
     HGDIOBJ oldBmp = SelectObject(memDc, memBmp);
 
-    FillRect(memDc, &rc, g.brBg);
-
     Gdiplus::Graphics gfx(memDc);
     gfx.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
     gfx.SetInterpolationMode(Gdiplus::InterpolationModeHighQualityBicubic);
-    SetBkMode(memDc, TRANSPARENT);
+    gfx.SetTextRenderingHint(Gdiplus::TextRenderingHintClearTypeGridFit);
 
-    // Top Header
+    Gdiplus::FontFamily* ff = MakeUiFontFamily();
+
+    // Canvas Background (#0B0E14)
+    Gdiplus::SolidBrush brCanvas(Gdiplus::Color(255, 0x0B, 0x0E, 0x14));
+    gfx.FillRectangle(&brCanvas, 0, 0, rc.right, rc.bottom);
+
+    // Header (Hero)
     if (g.appIconImg) {
-        gfx.DrawImage(g.appIconImg, S(24), S(20), S(40), S(40));
+        gfx.DrawImage(g.appIconImg, S(24), S(18), S(42), S(42));
     }
+    DrawTextGdip(gfx, ff, L"OmniFlow", SF(20.0f), Gdiplus::FontStyleBold,
+        Gdiplus::RectF((float)S(78), (float)S(15), (float)S(115), (float)S(26)),
+        Gdiplus::Color(255, 0xF8, 0xFA, 0xFC));
 
-    SelectObject(memDc, g.fontTitle);
-    SetTextColor(memDc, RGB(255, 255, 255));
-    RECT rcTitle{ S(76), S(18), S(390), S(44) };
-    DrawTextW(memDc, L"OmniFlow Installer", -1, &rcTitle, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+    // Version Badge next to Title
+    DrawRoundCard(gfx, Gdiplus::RectF((float)S(178), (float)S(19), (float)S(56), (float)S(20)), SF(5.0f),
+        Gdiplus::Color(255, 0x15, 0x22, 0x38), Gdiplus::Color(255, 0x25, 0x3A, 0x5E), 1.0f);
+    DrawTextGdip(gfx, ff, L"v1.0.0", SF(11.0f), Gdiplus::FontStyleBold,
+        Gdiplus::RectF((float)S(178), (float)S(19), (float)S(56), (float)S(20)),
+        Gdiplus::Color(255, 0x93, 0xC5, 0xFD), Gdiplus::StringAlignmentCenter, Gdiplus::StringAlignmentCenter);
 
-    SelectObject(memDc, g.fontSub);
-    SetTextColor(memDc, RGB(166, 166, 174));
-    RECT rcSub{ S(76), S(42), S(400), S(62) };
-    std::wstring sub = T(L"\u8DE8\u8BBE\u5907\u952E\u9F20\u4E0E\u6587\u4EF6\u65E0\u7F1D\u534F\u540C (Windows x64)", L"Cross-Device KVM & File Portal (Windows x64)");
-    DrawTextW(memDc, sub.c_str(), -1, &rcSub, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+    std::wstring sub = T(L"\u8DE8\u8BBE\u5907\u952E\u9F20\u5171\u4EAB\u3001\u8FB9\u7F18\u4F20\u9001\u5E26\u4E0E USB-C \u76F4\u8FDE (Windows x64)",
+                         L"Cross-Device KVM, File Portal & USB-C Bridge (Windows x64)");
+    DrawTextGdip(gfx, ff, sub, SF(12.5f), Gdiplus::FontStyleRegular,
+        Gdiplus::RectF((float)S(78), (float)S(42), (float)(rc.right - S(188)), (float)S(20)),
+        Gdiplus::Color(255, 0x94, 0xA3, 0xB8));
 
     // Language Pill (中 | EN) top-right
-    g.rcLangZh = { rc.right - S(92), S(24), rc.right - S(58), S(48) };
-    g.rcLangEn = { rc.right - S(56), S(24), rc.right - S(24), S(48) };
-    {
-        Gdiplus::SolidBrush brPillBg(Gdiplus::Color(255, 0x25, 0x25, 0x2A));
-        Gdiplus::Pen penPill(Gdiplus::Color(255, 0x3C, 0x3C, 0x42), 1.0f);
-        gfx.FillRectangle(&brPillBg, (INT)(rc.right - S(94)), S(22), S(72), S(28));
-        gfx.DrawRectangle(&penPill, (INT)(rc.right - S(94)), S(22), S(72), S(28));
+    g.rcLangZh = { rc.right - S(98), S(22), rc.right - S(61), S(48) };
+    g.rcLangEn = { rc.right - S(61), S(22), rc.right - S(24), S(48) };
+    DrawRoundCard(gfx, Gdiplus::RectF((float)(rc.right - S(100)), (float)S(20), (float)S(78), (float)S(30)), SF(8.0f),
+        Gdiplus::Color(255, 0x12, 0x17, 0x22), Gdiplus::Color(255, 0x1F, 0x29, 0x37), 1.0f);
+    RECT activeR = g.isEnglish ? g.rcLangEn : g.rcLangZh;
+    FillRoundRect(gfx,
+        Gdiplus::RectF((float)activeR.left, (float)activeR.top, (float)(activeR.right - activeR.left), (float)(activeR.bottom - activeR.top)),
+        SF(6.0f), Gdiplus::Color(255, 0x25, 0x63, 0xEB));
+    DrawTextGdip(gfx, ff, L"\u4E2D", SF(12.0f), Gdiplus::FontStyleBold,
+        Gdiplus::RectF((float)g.rcLangZh.left, (float)g.rcLangZh.top, (float)(g.rcLangZh.right - g.rcLangZh.left), (float)(g.rcLangZh.bottom - g.rcLangZh.top)),
+        g.isEnglish ? Gdiplus::Color(255, 0x94, 0xA3, 0xB8) : Gdiplus::Color(255, 255, 255, 255),
+        Gdiplus::StringAlignmentCenter, Gdiplus::StringAlignmentCenter);
+    DrawTextGdip(gfx, ff, L"EN", SF(12.0f), Gdiplus::FontStyleBold,
+        Gdiplus::RectF((float)g.rcLangEn.left, (float)g.rcLangEn.top, (float)(g.rcLangEn.right - g.rcLangEn.left), (float)(g.rcLangEn.bottom - g.rcLangEn.top)),
+        g.isEnglish ? Gdiplus::Color(255, 255, 255, 255) : Gdiplus::Color(255, 0x94, 0xA3, 0xB8),
+        Gdiplus::StringAlignmentCenter, Gdiplus::StringAlignmentCenter);
 
-        Gdiplus::SolidBrush brActive(Gdiplus::Color(255, 0x0A, 0x84, 0xFF));
-        RECT activeR = g.isEnglish ? g.rcLangEn : g.rcLangZh;
-        gfx.FillRectangle(&brActive, (INT)activeR.left, (INT)activeR.top, (INT)(activeR.right - activeR.left), (INT)(activeR.bottom - activeR.top));
-
-        SelectObject(memDc, g.fontBold);
-        SetTextColor(memDc, g.isEnglish ? RGB(170, 170, 176) : RGB(255, 255, 255));
-        DrawTextW(memDc, L"\u4E2D", -1, &g.rcLangZh, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-        SetTextColor(memDc, g.isEnglish ? RGB(255, 255, 255) : RGB(170, 170, 176));
-        DrawTextW(memDc, L"EN", -1, &g.rcLangEn, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-    }
-
-    // Author GitHub Card (Circular Avatar + Octocat Icon + Synced Display Name + Clickable Link)
+    // Card 1: Author GitHub Card
     g.rcAuthorCard = { S(24), S(74), rc.right - S(24), S(140) };
     {
-        Gdiplus::Color cardBg = g.hoverAuthor ? Gdiplus::Color(255, 0x28, 0x2B, 0x34) : Gdiplus::Color(255, 0x22, 0x23, 0x28);
-        Gdiplus::Color cardBd = g.hoverAuthor ? Gdiplus::Color(255, 0x64, 0xD2, 0xFF) : Gdiplus::Color(255, 0x34, 0x35, 0x3D);
-        Gdiplus::SolidBrush brCard(cardBg);
-        Gdiplus::Pen penCard(cardBd, 1.0f);
-        gfx.FillRectangle(&brCard, (INT)g.rcAuthorCard.left, (INT)g.rcAuthorCard.top,
-                           (INT)(g.rcAuthorCard.right - g.rcAuthorCard.left), (INT)(g.rcAuthorCard.bottom - g.rcAuthorCard.top));
-        gfx.DrawRectangle(&penCard, (INT)g.rcAuthorCard.left, (INT)g.rcAuthorCard.top,
-                          (INT)(g.rcAuthorCard.right - g.rcAuthorCard.left), (INT)(g.rcAuthorCard.bottom - g.rcAuthorCard.top));
+        Gdiplus::Color cardBg = g.hoverAuthor ? Gdiplus::Color(255, 0x17, 0x20, 0x33) : Gdiplus::Color(255, 0x12, 0x17, 0x22);
+        Gdiplus::Color cardBd = g.hoverAuthor ? Gdiplus::Color(255, 0x3B, 0x82, 0xF6) : Gdiplus::Color(255, 0x1F, 0x29, 0x37);
+        DrawRoundCard(gfx,
+            Gdiplus::RectF((float)g.rcAuthorCard.left, (float)g.rcAuthorCard.top,
+                (float)(g.rcAuthorCard.right - g.rcAuthorCard.left), (float)(g.rcAuthorCard.bottom - g.rcAuthorCard.top)),
+            SF(12.0f), cardBg, cardBd, 1.0f);
 
-        // Circular Avatar
         Gdiplus::Rect avRect(S(38), S(85), S(44), S(44));
         if (g.avatarImg) {
             Gdiplus::GraphicsState st = gfx.Save();
@@ -543,51 +712,87 @@ static void PaintWindow(HWND hwnd) {
             gfx.DrawImage(g.avatarImg, avRect);
             gfx.Restore(st);
         }
-        Gdiplus::Pen avRing(Gdiplus::Color(220, 0x64, 0xD2, 0xFF), 1.6f);
+        Gdiplus::Pen avRing(Gdiplus::Color(230, 0x3B, 0x82, 0xF6), 1.6f);
         gfx.DrawEllipse(&avRing, avRect);
 
-        // Tiny Octocat mark next to Name
-        DrawGitHubOctocat(gfx, (float)S(94), (float)S(89), (float)S(15), Gdiplus::Color(255, 255, 255, 255));
+        DrawGitHubOctocat(gfx, (float)S(96), (float)S(88), (float)S(16),
+            Gdiplus::Color(255, 0xF8, 0xFA, 0xFC), cardBg);
 
-        SelectObject(memDc, g.fontBold);
-        SetTextColor(memDc, RGB(255, 255, 255));
-        RECT rcName{ S(115), S(86), rc.right - S(130), S(108) };
-        DrawTextW(memDc, g.authorName.c_str(), -1, &rcName, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+        DrawTextGdip(gfx, ff, g.authorName, SF(14.0f), Gdiplus::FontStyleBold,
+            Gdiplus::RectF((float)S(118), (float)S(85), (float)(rc.right - S(250)), (float)S(22)),
+            Gdiplus::Color(255, 0xF8, 0xFA, 0xFC));
 
-        SelectObject(memDc, g.fontMono);
-        SetTextColor(memDc, RGB(100, 210, 255));
-        RECT rcHandle{ S(94), S(108), rc.right - S(90), S(128) };
-        std::wstring line2 = g.authorHandle + L"  ·  https://github.com/KSLengYu";
-        DrawTextW(memDc, line2.c_str(), -1, &rcHandle, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+        std::wstring line2 = g.authorHandle + L"  ·  github.com/KSLengYu/OmniFlow";
+        DrawTextGdip(gfx, ff, line2, SF(12.0f), Gdiplus::FontStyleRegular,
+            Gdiplus::RectF((float)S(96), (float)S(110), (float)(rc.right - S(200)), (float)S(20)),
+            Gdiplus::Color(255, 0x60, 0xA5, 0xFA));
 
-        SelectObject(memDc, g.fontNormal);
-        SetTextColor(memDc, RGB(165, 165, 175));
-        RECT rcArrow{ rc.right - S(96), S(86), rc.right - S(36), S(128) };
-        DrawTextW(memDc, T(L"\u4E3B\u9875 \u2197", L"GitHub \u2197").c_str(), -1, &rcArrow, DT_RIGHT | DT_VCENTER | DT_SINGLELINE);
+        DrawTextGdip(gfx, ff, T(L"GitHub \u4E3B\u9875 \u2197", L"GitHub \u2197"), SF(12.0f), Gdiplus::FontStyleRegular,
+            Gdiplus::RectF((float)(rc.right - S(130)), (float)S(85), (float)S(90), (float)S(44)),
+            g.hoverAuthor ? Gdiplus::Color(255, 0x93, 0xC5, 0xFD) : Gdiplus::Color(255, 0x94, 0xA3, 0xB8),
+            Gdiplus::StringAlignmentFar, Gdiplus::StringAlignmentCenter);
     }
 
-    // Install Folder Label + Runtime Check Badge
-    SelectObject(memDc, g.fontBold);
-    SetTextColor(memDc, RGB(230, 230, 235));
-    RECT rcDirLbl{ S(24), S(156), S(280), S(176) };
-    DrawTextW(memDc, T(L"\u5B89\u88C5\u76EE\u5F55", L"Install Location").c_str(), -1, &rcDirLbl, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+    // Card 2: Install Location Card
+    DrawRoundCard(gfx, Gdiplus::RectF((float)S(24), (float)S(154), (float)(rc.right - S(48)), (float)S(92)),
+        SF(12.0f), Gdiplus::Color(255, 0x12, 0x17, 0x22), Gdiplus::Color(255, 0x1F, 0x29, 0x37), 1.0f);
 
-    // .NET 10 Status Text
-    SelectObject(memDc, g.fontNormal);
-    SetTextColor(memDc, g.dotnetReady ? RGB(48, 209, 88) : RGB(255, 159, 10));
-    RECT rcDotNet{ S(260), S(156), g.dotnetReady ? (rc.right - S(24)) : (rc.right - S(118)), S(176) };
+    DrawTextGdip(gfx, ff, T(L"\u5B89\u88C5\u76EE\u5F55", L"Install Location"), SF(13.0f), Gdiplus::FontStyleBold,
+        Gdiplus::RectF((float)S(40), (float)S(165), (float)S(200), (float)S(22)),
+        Gdiplus::Color(255, 0xE2, 0xE8, 0xF0));
+
     std::wstring dnText = g.dotnetReady
         ? T(L"\u2713 .NET 10 \u684C\u9762\u8FD0\u884C\u65F6\u5DF2\u5C31\u7EEA", L"\u2713 .NET 10 Desktop Runtime Ready")
         : T(L"\u26A0 \u9700 .NET 10 \u8FD0\u884C\u65F6", L"\u26A0 Needs .NET 10 Runtime");
-    DrawTextW(memDc, dnText.c_str(), -1, &rcDotNet, DT_RIGHT | DT_VCENTER | DT_SINGLELINE);
+    Gdiplus::Color dnCol = g.dotnetReady
+        ? Gdiplus::Color(255, 0x34, 0xD3, 0x99)
+        : Gdiplus::Color(255, 0xFB, 0xBF, 0x24);
+    float dnRight = (float)(g.dotnetReady ? (rc.right - S(40)) : (rc.right - S(138)));
+    DrawTextGdip(gfx, ff, dnText, SF(12.0f), Gdiplus::FontStyleRegular,
+        Gdiplus::RectF((float)S(220), (float)S(165), dnRight - (float)S(220), (float)S(22)),
+        dnCol, Gdiplus::StringAlignmentFar, Gdiplus::StringAlignmentCenter);
 
-    // Status message above bottom buttons
+    // Recessed rounded input container behind borderless EDIT
+    DrawRoundCard(gfx, Gdiplus::RectF((float)S(40), (float)S(196), (float)(rc.right - S(170)), (float)S(34)),
+        SF(8.0f), Gdiplus::Color(255, 0x08, 0x0B, 0x10), Gdiplus::Color(255, 0x26, 0x32, 0x48), 1.0f);
+
+    // Card 3: Install Options Card
+    DrawRoundCard(gfx, Gdiplus::RectF((float)S(24), (float)S(260), (float)(rc.right - S(48)), (float)S(96)),
+        SF(12.0f), Gdiplus::Color(255, 0x12, 0x17, 0x22), Gdiplus::Color(255, 0x1F, 0x29, 0x37), 1.0f);
+
+    DrawTextGdip(gfx, ff, T(L"\u5B89\u88C5\u9009\u9879", L"Install Options"), SF(13.0f), Gdiplus::FontStyleBold,
+        Gdiplus::RectF((float)S(40), (float)S(271), (float)S(200), (float)S(20)),
+        Gdiplus::Color(255, 0x94, 0xA3, 0xB8));
+
+    g.rcChkDesktop = { S(40), S(296), rc.right - S(40), S(322) };
+    g.rcChkLaunch  = { S(40), S(324), rc.right - S(40), S(350) };
+    DrawCheckboxRow(gfx, ff, g.rcChkDesktop, g.createDesktopShortcut,
+        T(L"\u521B\u5EFA\u684C\u9762\u5FEB\u6377\u65B9\u5F0F (OmniFlow)", L"Create Desktop shortcut (OmniFlow)"));
+    DrawCheckboxRow(gfx, ff, g.rcChkLaunch, g.launchOnExit,
+        T(L"\u5B89\u88C5\u5B8C\u6210\u540E\u7ACB\u5373\u542F\u52A8 OmniFlow", L"Launch OmniFlow after installation"));
+
+    // Status Text
     if (!g.statusText.empty()) {
-        SelectObject(memDc, g.fontNormal);
-        SetTextColor(memDc, g.installedOk ? RGB(48, 209, 88) : RGB(195, 195, 205));
-        RECT rcStat{ S(24), S(294), rc.right - S(24), S(316) };
-        DrawTextW(memDc, g.statusText.c_str(), -1, &rcStat, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+        Gdiplus::Color stCol = g.installedOk
+            ? Gdiplus::Color(255, 0x34, 0xD3, 0x99)
+            : Gdiplus::Color(255, 0xCB, 0xD5, 0xE1);
+        DrawTextGdip(gfx, ff, g.statusText, SF(12.5f), Gdiplus::FontStyleRegular,
+            Gdiplus::RectF((float)S(24), (float)S(370), (float)(rc.right - S(48)), (float)S(20)),
+            stCol);
     }
+
+    // Custom Rounded Progress Bar
+    Gdiplus::RectF trackR((float)S(24), (float)S(396), (float)(rc.right - S(48)), (float)S(8));
+    FillRoundRect(gfx, trackR, SF(4.0f), Gdiplus::Color(255, 0x16, 0x20, 0x32));
+    if (g.progressPct > 0) {
+        int clamped = g.progressPct > 100 ? 100 : g.progressPct;
+        float fillW = trackR.Width * (float)clamped / 100.0f;
+        if (fillW < SF(8.0f)) fillW = SF(8.0f);
+        FillRoundRect(gfx, Gdiplus::RectF(trackR.X, trackR.Y, fillW, trackR.Height), SF(4.0f),
+            g.installedOk ? Gdiplus::Color(255, 0x10, 0xB9, 0x81) : Gdiplus::Color(255, 0x3B, 0x82, 0xF6));
+    }
+
+    delete ff;
 
     BitBlt(hdc, 0, 0, rc.right, rc.bottom, memDc, 0, 0, SRCCOPY);
     SelectObject(memDc, oldBmp);
@@ -602,15 +807,11 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
         EnableDarkTitleBar(hwnd);
         g.hwnd = hwnd;
 
-        g.fontTitle = CreateFontW(-S(19), 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE, DEFAULT_CHARSET, 0, 0, CLEARTYPE_QUALITY, 0, L"Segoe UI");
-        g.fontSub = CreateFontW(-S(12), 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET, 0, 0, CLEARTYPE_QUALITY, 0, L"Microsoft YaHei UI");
-        g.fontBold = CreateFontW(-S(12), 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE, DEFAULT_CHARSET, 0, 0, CLEARTYPE_QUALITY, 0, L"Microsoft YaHei UI");
-        g.fontNormal = CreateFontW(-S(12), 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET, 0, 0, CLEARTYPE_QUALITY, 0, L"Microsoft YaHei UI");
-        g.fontMono = CreateFontW(-S(11), 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET, 0, 0, CLEARTYPE_QUALITY, 0, L"Consolas");
+        g.fontEdit = CreateFontW(-S(14), 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+            DEFAULT_CHARSET, 0, 0, CLEARTYPE_NATURAL_QUALITY, 0, L"Microsoft YaHei UI");
 
-        g.brBg = CreateSolidBrush(RGB(0x18, 0x18, 0x1B));
-        g.brCard = CreateSolidBrush(RGB(0x22, 0x23, 0x28));
-        g.brEdit = CreateSolidBrush(RGB(0x24, 0x24, 0x2A));
+        g.brBg = CreateSolidBrush(RGB(0x0B, 0x0E, 0x14));
+        g.brEdit = CreateSolidBrush(RGB(0x08, 0x0B, 0x10));
 
         g.avatarImg = LoadImageFromResource(IDR_AVATAR_JPG, RT_RCDATA);
         HICON hIco = (HICON)LoadImageW(GetModuleHandleW(nullptr), MAKEINTRESOURCEW(IDI_APP_ICON), IMAGE_ICON, S(48), S(48), 0);
@@ -624,7 +825,6 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
         g.isEnglish = ((lang & 0x3FF) != LANG_CHINESE);
         g.dotnetReady = CheckDotNet10DesktopRuntime();
 
-        // Default install dir: C:\OmniFlow if writable/present else %LocalAppData%\Programs\OmniFlow
         wchar_t localApp[MAX_PATH]{};
         if (GetFileAttributesW(L"C:\\OmniFlow\\OmniFlow.exe") != INVALID_FILE_ATTRIBUTES) {
             g.installDir = L"C:\\OmniFlow";
@@ -634,40 +834,26 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             g.installDir = L"C:\\OmniFlow";
         }
 
-        g.pathEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", g.installDir.c_str(),
+        RECT crc{};
+        GetClientRect(hwnd, &crc);
+        int cw = crc.right;
+
+        // Borderless modern EDIT centered vertically inside rounded #080B10 container (top 196, h 34)
+        g.pathEdit = CreateWindowExW(0, L"EDIT", g.installDir.c_str(),
                                      WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL,
-                                     S(24), S(182), S(390), S(28), hwnd, (HMENU)IDC_PATH_EDIT, nullptr, nullptr);
-        SendMessageW(g.pathEdit, WM_SETFONT, (WPARAM)g.fontNormal, TRUE);
+                                     S(50), S(204), cw - S(190), S(20), hwnd, (HMENU)IDC_PATH_EDIT, nullptr, nullptr);
+        SendMessageW(g.pathEdit, WM_SETFONT, (WPARAM)g.fontEdit, TRUE);
 
-        g.browseBtn = CreateWindowW(L"BUTTON", L"...", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-                                    S(422), S(182), S(74), S(28), hwnd, (HMENU)IDC_BROWSE_BTN, nullptr, nullptr);
-        SendMessageW(g.browseBtn, WM_SETFONT, (WPARAM)g.fontNormal, TRUE);
-
-        g.chkDesktop = CreateWindowW(L"BUTTON", L"", WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
-                                     S(24), S(224), S(300), S(24), hwnd, (HMENU)IDC_CHK_DESKTOP, nullptr, nullptr);
-        ClearThemeForDarkText(g.chkDesktop);
-        SendMessageW(g.chkDesktop, WM_SETFONT, (WPARAM)g.fontNormal, TRUE);
-        SendMessageW(g.chkDesktop, BM_SETCHECK, BST_CHECKED, 0);
-
-        g.chkLaunch = CreateWindowW(L"BUTTON", L"", WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
-                                    S(24), S(252), S(320), S(24), hwnd, (HMENU)IDC_CHK_LAUNCH, nullptr, nullptr);
-        ClearThemeForDarkText(g.chkLaunch);
-        SendMessageW(g.chkLaunch, WM_SETFONT, (WPARAM)g.fontNormal, TRUE);
-        SendMessageW(g.chkLaunch, BM_SETCHECK, BST_CHECKED, 0);
+        g.browseBtn = CreateWindowW(L"BUTTON", L"...", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
+                                    cw - S(120), S(196), S(80), S(34), hwnd, (HMENU)IDC_BROWSE_BTN, nullptr, nullptr);
 
         if (!g.dotnetReady) {
-            g.dotnetBtn = CreateWindowW(L"BUTTON", L"Get .NET 10", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-                                        S(406), S(152), S(90), S(24), hwnd, (HMENU)IDC_DOTNET_BTN, nullptr, nullptr);
-            SendMessageW(g.dotnetBtn, WM_SETFONT, (WPARAM)g.fontNormal, TRUE);
+            g.dotnetBtn = CreateWindowW(L"BUTTON", L"Get .NET 10", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
+                                        cw - S(130), S(162), S(90), S(26), hwnd, (HMENU)IDC_DOTNET_BTN, nullptr, nullptr);
         }
 
-        g.progressBar = CreateWindowW(PROGRESS_CLASSW, nullptr, WS_CHILD | WS_VISIBLE | PBS_SMOOTH,
-                                      S(24), S(322), S(472), S(14), hwnd, (HMENU)IDC_PROGRESS, nullptr, nullptr);
-        SendMessageW(g.progressBar, PBM_SETRANGE, 0, MAKELPARAM(0, 100));
-
-        g.installBtn = CreateWindowW(L"BUTTON", L"Install", WS_CHILD | WS_VISIBLE | BS_DEFPUSHBUTTON,
-                                     S(346), S(350), S(150), S(34), hwnd, (HMENU)IDC_INSTALL_BTN, nullptr, nullptr);
-        SendMessageW(g.installBtn, WM_SETFONT, (WPARAM)g.fontBold, TRUE);
+        g.installBtn = CreateWindowW(L"BUTTON", L"Install", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
+                                     cw - S(184), S(416), S(160), S(38), hwnd, (HMENU)IDC_INSTALL_BTN, nullptr, nullptr);
 
         g.statusText = T(L"\u51C6\u5907\u5C31\u7EEA\uFF0C\u70B9\u51FB\u53F3\u4E0B\u89D2\u5F00\u59CB\u5B89\u88C5", L"Ready. Click Install to continue.");
         RefreshUiLanguageStrings();
@@ -675,17 +861,15 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
         return 0;
     }
 
-    case WM_CTLCOLORSTATIC: {
-        HDC hdc = (HDC)wParam;
-        SetTextColor(hdc, RGB(230, 230, 235));
-        SetBkColor(hdc, RGB(0x18, 0x18, 0x1B));
-        return (LRESULT)g.brBg;
+    case WM_DRAWITEM: {
+        DrawOwnerButton((const DRAWITEMSTRUCT*)lParam);
+        return TRUE;
     }
 
     case WM_CTLCOLOREDIT: {
         HDC hdc = (HDC)wParam;
-        SetTextColor(hdc, RGB(255, 255, 255));
-        SetBkColor(hdc, RGB(0x24, 0x24, 0x2A));
+        SetTextColor(hdc, RGB(0xF8, 0xFA, 0xFC));
+        SetBkColor(hdc, RGB(0x08, 0x0B, 0x10));
         return (LRESULT)g.brEdit;
     }
 
@@ -700,11 +884,28 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
     }
 
     case WM_SETCURSOR: {
-        if ((HWND)wParam == hwnd && LOWORD(lParam) == HTCLIENT) {
+        HWND target = (HWND)wParam;
+        int prevHover = g.hoverBtnId;
+        if (target == g.installBtn) g.hoverBtnId = IDC_INSTALL_BTN;
+        else if (target == g.browseBtn) g.hoverBtnId = IDC_BROWSE_BTN;
+        else if (target == g.dotnetBtn && g.dotnetBtn != nullptr) g.hoverBtnId = IDC_DOTNET_BTN;
+        else g.hoverBtnId = 0;
+
+        if (prevHover != g.hoverBtnId) {
+            if (prevHover == IDC_INSTALL_BTN) InvalidateRect(g.installBtn, nullptr, FALSE);
+            else if (prevHover == IDC_BROWSE_BTN) InvalidateRect(g.browseBtn, nullptr, FALSE);
+            else if (prevHover == IDC_DOTNET_BTN && g.dotnetBtn) InvalidateRect(g.dotnetBtn, nullptr, FALSE);
+            if (g.hoverBtnId == IDC_INSTALL_BTN) InvalidateRect(g.installBtn, nullptr, FALSE);
+            else if (g.hoverBtnId == IDC_BROWSE_BTN) InvalidateRect(g.browseBtn, nullptr, FALSE);
+            else if (g.hoverBtnId == IDC_DOTNET_BTN && g.dotnetBtn) InvalidateRect(g.dotnetBtn, nullptr, FALSE);
+        }
+
+        if (target == hwnd && LOWORD(lParam) == HTCLIENT) {
             POINT pt{};
             GetCursorPos(&pt);
             ScreenToClient(hwnd, &pt);
-            if (PtInRect(&g.rcAuthorCard, pt) || PtInRect(&g.rcLangZh, pt) || PtInRect(&g.rcLangEn, pt)) {
+            if (PtInRect(&g.rcAuthorCard, pt) || PtInRect(&g.rcLangZh, pt) || PtInRect(&g.rcLangEn, pt) ||
+                PtInRect(&g.rcChkDesktop, pt) || PtInRect(&g.rcChkLaunch, pt)) {
                 SetCursor(LoadCursorW(nullptr, IDC_HAND));
                 return TRUE;
             }
@@ -730,6 +931,16 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
         }
         if (PtInRect(&g.rcAuthorCard, pt)) {
             ShellExecuteW(hwnd, L"open", GITHUB_URL, nullptr, nullptr, SW_SHOWNORMAL);
+            return 0;
+        }
+        if (!g.installing && !g.installedOk && PtInRect(&g.rcChkDesktop, pt)) {
+            g.createDesktopShortcut = !g.createDesktopShortcut;
+            InvalidateRect(hwnd, &g.rcChkDesktop, FALSE);
+            return 0;
+        }
+        if (!g.installedOk && PtInRect(&g.rcChkLaunch, pt)) {
+            g.launchOnExit = !g.launchOnExit;
+            InvalidateRect(hwnd, &g.rcChkLaunch, FALSE);
             return 0;
         }
         break;
@@ -759,7 +970,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             ShellExecuteW(hwnd, L"open", DOTNET10_DL_URL, nullptr, nullptr, SW_SHOWNORMAL);
         } else if (id == IDC_INSTALL_BTN) {
             if (g.installedOk) {
-                if (SendMessageW(g.chkLaunch, BM_GETCHECK, 0, 0) == BST_CHECKED) {
+                if (g.launchOnExit) {
                     std::wstring exe = g.installDir + L"\\OmniFlow.exe";
                     ShellExecuteW(nullptr, L"open", exe.c_str(), nullptr, g.installDir.c_str(), SW_SHOWNORMAL);
                 }
@@ -771,9 +982,8 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                 GetWindowTextW(g.pathEdit, buf, MAX_PATH);
                 if (wcslen(buf) < 3) return 0;
                 g.installDir = buf;
-                g.createDesktopShortcut = (SendMessageW(g.chkDesktop, BM_GETCHECK, 0, 0) == BST_CHECKED);
-                g.launchOnExit = (SendMessageW(g.chkLaunch, BM_GETCHECK, 0, 0) == BST_CHECKED);
                 g.installing = true;
+                g.progressPct = 5;
                 EnableWindow(g.pathEdit, FALSE);
                 EnableWindow(g.browseBtn, FALSE);
                 EnableWindow(g.installBtn, FALSE);
@@ -794,8 +1004,9 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
     }
 
     case WM_INSTALL_PROGRESS: {
-        int pct = (int)wParam;
-        SendMessageW(g.progressBar, PBM_SETPOS, (WPARAM)pct, 0);
+        g.progressPct = (int)wParam;
+        RECT rcProg{ S(24), S(394), 2000, S(408) };
+        InvalidateRect(hwnd, &rcProg, FALSE);
         return 0;
     }
 
@@ -803,6 +1014,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
         g.installing = false;
         if (wParam == 1) {
             g.installedOk = true;
+            g.progressPct = 100;
             g.statusText = T(L"\u5B89\u88C5\u5B8C\u6210\uFF01\u70B9\u51FB\u300C\u5B8C\u6210\u300D\u5373\u53EF\u542F\u52A8 OmniFlow\u3002", L"Installation complete! Click Finish to launch OmniFlow.");
             EnableWindow(g.installBtn, TRUE);
         } else {
@@ -824,13 +1036,8 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
     case WM_DESTROY:
         if (g.avatarImg) delete g.avatarImg;
         if (g.appIconImg) delete g.appIconImg;
-        DeleteObject(g.fontTitle);
-        DeleteObject(g.fontSub);
-        DeleteObject(g.fontBold);
-        DeleteObject(g.fontNormal);
-        DeleteObject(g.fontMono);
+        DeleteObject(g.fontEdit);
         DeleteObject(g.brBg);
-        DeleteObject(g.brCard);
         DeleteObject(g.brEdit);
         PostQuitMessage(0);
         return 0;
@@ -871,7 +1078,6 @@ static int PerformUninstall(const std::wstring& targetDir) {
     for (const auto* f : files)
         DeleteFileW((targetDir + L"\\" + f).c_str());
 
-    // Self-delete uninstaller & folder cleanly
     wchar_t selfPath[MAX_PATH]{};
     GetModuleFileNameW(nullptr, selfPath, MAX_PATH);
     std::wstring cmdLine = L"cmd.exe /c ping -n 2 127.0.0.1 >nul & del /f /q \"" + std::wstring(selfPath) + L"\" & rmdir /q \"" + targetDir + L"\"";
@@ -887,7 +1093,6 @@ static int PerformUninstall(const std::wstring& targetDir) {
 }
 
 int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR lpCmdLine, int) {
-    // Enable Per-Monitor V2 DPI awareness dynamically without conflicting with MinGW default manifest
     if (HMODULE hUser = GetModuleHandleW(L"user32.dll")) {
         typedef BOOL(WINAPI* PFN_DpiCtx)(HANDLE);
         if (auto fn = (PFN_DpiCtx)GetProcAddress(hUser, "SetProcessDpiAwarenessContext")) {
@@ -919,7 +1124,7 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR lpCmdLine, int) {
         ReleaseDC(nullptr, screenDc);
     }
 
-    INITCOMMONCONTROLSEX icc{ sizeof(icc), ICC_PROGRESS_CLASS | ICC_STANDARD_CLASSES };
+    INITCOMMONCONTROLSEX icc{ sizeof(icc), ICC_STANDARD_CLASSES };
     InitCommonControlsEx(&icc);
     CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
 
@@ -935,7 +1140,7 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR lpCmdLine, int) {
     wc.hIcon = LoadIconW(hInst, MAKEINTRESOURCEW(IDI_APP_ICON));
     RegisterClassExW(&wc);
 
-    int w = S(528), h = S(432);
+    int w = S(564), h = S(506);
     int sw = GetSystemMetrics(SM_CXSCREEN), sh = GetSystemMetrics(SM_CYSCREEN);
     HWND hwnd = CreateWindowExW(
         0, wc.lpszClassName, L"OmniFlow Installer",

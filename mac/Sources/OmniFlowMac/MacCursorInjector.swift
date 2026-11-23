@@ -140,6 +140,7 @@ final class RemoteCursorInjector: @unchecked Sendable {
     private var moveSeq: UInt64 = 0
     private var focusEpoch: UInt64 = 0
     private var lastInjectedPoint: CGPoint?
+    private var injectedButtonsMask: UInt8 = 0
     private var pendingTiming: FocusTimingTrace?
     private var timingLogger: (@Sendable (String) -> Void)?
     private let eventSource: CGEventSource? = {
@@ -288,8 +289,36 @@ final class RemoteCursorInjector: @unchecked Sendable {
         )
     }
 
+    func updateInjectedMouseButton(button: UInt8, isDown: Bool) -> CGPoint? {
+        lock.lock()
+        let bit: UInt8 = (button == 2) ? 2 : (button == 3 ? 4 : 1)
+        if isDown {
+            injectedButtonsMask |= bit
+        } else {
+            injectedButtonsMask &= ~bit
+        }
+        let pt = lastInjectedPoint
+        lock.unlock()
+        return pt
+    }
+
     private func postMouseMovedLocked(to pt: CGPoint, deltaX: Double, deltaY: Double) -> Bool {
-        guard let ev = CGEvent(mouseEventSource: eventSource, mouseType: .mouseMoved, mouseCursorPosition: pt, mouseButton: .left) else {
+        let mouseType: CGEventType
+        let cgBtn: CGMouseButton
+        if (injectedButtonsMask & 1) != 0 {
+            mouseType = .leftMouseDragged
+            cgBtn = .left
+        } else if (injectedButtonsMask & 2) != 0 {
+            mouseType = .rightMouseDragged
+            cgBtn = .right
+        } else if (injectedButtonsMask & 4) != 0 {
+            mouseType = .otherMouseDragged
+            cgBtn = .center
+        } else {
+            mouseType = .mouseMoved
+            cgBtn = .left
+        }
+        guard let ev = CGEvent(mouseEventSource: eventSource, mouseType: mouseType, mouseCursorPosition: pt, mouseButton: cgBtn) else {
             return false
         }
         ev.setIntegerValueField(.mouseEventDeltaX, value: Int64(deltaX.rounded()))

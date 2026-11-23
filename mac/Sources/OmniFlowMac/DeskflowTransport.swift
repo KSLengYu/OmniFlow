@@ -32,6 +32,7 @@ final class DeskflowTransport: @unchecked Sendable {
     private var manuallyPausedAll: Bool = false
     private var knownPeerIps: Set<String> = []
     private var peerHostName: String = ""
+    private(set) var peerHostOs: String = ""
     private var peerMonitors: [WireMonitorDto] = []
 
     /// Active incoming file transfers keyed by transferId (implemented in DeskflowTransport+FileTransfer.swift)
@@ -62,7 +63,7 @@ final class DeskflowTransport: @unchecked Sendable {
 
     // Callbacks delivered to DeskflowEngine on MainActor
     var onLinksUpdated: (() -> Void)?
-    var onPeerMonitorsUpdated: (([WireMonitorDto], String) -> Void)?
+    var onPeerMonitorsUpdated: (([WireMonitorDto], String, String) -> Void)?
     var onTopologySync: ((WireTopologySyncPayload) -> Void)?
     var onConfigSync: ((WireConfigSyncPayload) -> Void)?
     var onRemoteClipboardText: ((String) -> Void)?
@@ -233,7 +234,7 @@ final class DeskflowTransport: @unchecked Sendable {
             let req = PendingPairingRequest(
                 fingerprint: norm,
                 remoteIp: remoteIp,
-                hostName: hostHint.isEmpty ? "Windows 设备 (\(remoteIp))" : hostHint,
+                hostName: hostHint.isEmpty ? "对端设备 (\(remoteIp))" : hostHint,
                 sasCode: sas
             )
             onPendingPairingRequest?(req)
@@ -942,9 +943,10 @@ final class DeskflowTransport: @unchecked Sendable {
                 let hello = try JSONDecoder().decode(WireHelloPayload.self, from: payload)
                 stateLock.lock()
                 peerHostName = hello.host
+                peerHostOs = hello.os
                 peerMonitors = hello.monitors
                 stateLock.unlock()
-                onPeerMonitorsUpdated?(hello.monitors, hello.host)
+                onPeerMonitorsUpdated?(hello.monitors, hello.host, hello.os)
                 for ip in hello.usbIps where MacBridgeSubnet.isUsbBridgeIp(ip) {
                     connectIfNeeded(peerIp: ip, localIpHint: nil, isUsb: true)
                 }
@@ -1037,16 +1039,20 @@ final class DeskflowTransport: @unchecked Sendable {
 
         case .kvmFocusSwitch:
             if let sw = try? JSONDecoder().decode(WireKvmFocusPayload.self, from: payload) {
-                let started = KvmStageTracer.shared.beginFocusSwitch(targetOs: sw.targetOs)
+                stateLock.lock()
+                let isMacPeer = peerHostOs.lowercased().contains("mac")
+                stateLock.unlock()
+                let isIncoming = isMacPeer ? (sw.action != "leave") : (sw.targetOs == "macOS")
+                let started = KvmStageTracer.shared.beginFocusSwitch(targetOs: isIncoming ? "macOS" : sw.targetOs)
                 let sX = String(format: "%.4f", sw.normX)
                 let sY = String(format: "%.4f", sw.normY)
                 KvmStageTracer.shared.log(
                     seq: started.seq,
                     t0Ns: started.recvNs,
                     nowNs: started.recvNs,
-                    "netRecvFocus target=\(sw.targetOs) link=\(link.id) mon=\(sw.monitorIndex) norm=(\(sX),\(sY))"
+                    "netRecvFocus target=\(sw.targetOs) action=\(sw.action ?? "nil") incoming=\(isIncoming) link=\(link.id) mon=\(sw.monitorIndex) norm=(\(sX),\(sY))"
                 )
-                if sw.targetOs == "macOS", onKvmFocusSwitch == nil {
+                if isIncoming, onKvmFocusSwitch == nil {
                     KvmStageTracer.shared.log(seq: started.seq, t0Ns: started.recvNs, "error_onKvmFocusSwitchNil")
                 }
                 onKvmFocusSwitch?(sw)

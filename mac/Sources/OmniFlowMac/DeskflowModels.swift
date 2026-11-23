@@ -180,6 +180,7 @@ struct IndependentDisplayNode: Identifiable, Codable, Equatable {
     var displayIndex: Int
     var name: String
     var osKind: PeerOSKind
+    var isRemote: Bool = false
     var widthPx: Int
     var heightPx: Int
     var scaleFactor: Double

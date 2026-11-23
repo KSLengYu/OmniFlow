@@ -122,6 +122,7 @@ struct WireKvmFocusPayload: Codable {
     let monitorIndex: Int
     let normX: Double
     let normY: Double
+    var action: String? = nil
 }
 
 struct WireDataBindPayload: Codable {
@@ -373,7 +374,7 @@ final class TrustedPeerStore: @unchecked Sendable {
         guard !norm.isEmpty else { return }
         let rec = TrustedPeerRecord(
             fingerprint: norm,
-            hostName: hostName.isEmpty ? "Windows Peer" : hostName,
+            hostName: hostName.isEmpty ? "Remote Peer" : hostName,
             pairedAtIso: ISO8601DateFormatter().string(from: Date())
         )
         lock.lock()

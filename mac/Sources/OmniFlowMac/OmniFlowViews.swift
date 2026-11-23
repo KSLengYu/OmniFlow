@@ -94,7 +94,9 @@ struct OmniFlowMainView: View {
                         Text(engine.t("控制端：", "Active Host: "))
                             .font(.system(size: 11.5))
                             .foregroundColor(Color(white: 0.62))
-                        Text(engine.remoteFocusOnWindows ? "Windows" : engine.t("Mac 本机", "This Mac"))
+                        Text(engine.remoteFocusOnWindows
+                             ? (engine.peerIsMac ? engine.t("对端 Mac", "Remote Mac") : "Windows")
+                             : engine.t("Mac 本机", "This Mac"))
                             .font(.system(size: 11.5, weight: .semibold))
                             .foregroundColor(engine.remoteFocusOnWindows
                                              ? Color(red: 0x0A / 255.0, green: 0x84 / 255.0, blue: 0xFF / 255.0)

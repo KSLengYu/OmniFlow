@@ -130,11 +130,13 @@ extension DeskflowEngine {
                 }
                 usedIds.insert(nodeId)
 
+                let remoteIsMac = rm.osKind.lowercased().contains("mac") || peerIsMac
                 var node = IndependentDisplayNode(
                     id: nodeId,
                     displayIndex: max(0, rm.displayIndex - 1),
                     name: rm.name,
-                    osKind: .windows,
+                    osKind: remoteIsMac ? .mac : .windows,
+                    isRemote: true,
                     widthPx: rm.widthPx,
                     heightPx: rm.heightPx,
                     scaleFactor: rm.scaleFactor,
@@ -284,8 +286,8 @@ extension DeskflowEngine {
 
     /// Automatically moves the file-transfer edge portal to the Mac monitor & edge facing the Windows display(s).
     func syncPortalEdgeFromDisplayLayout() {
-        let macNodes = displayNodes.filter { $0.osKind == .mac }
-        let winNodes = displayNodes.filter { $0.osKind == .windows }
+        let macNodes = displayNodes.filter { !$0.isRemote }
+        let winNodes = displayNodes.filter { $0.isRemote }
         guard !macNodes.isEmpty, !winNodes.isEmpty else { return }
 
         var bestMac = macNodes[0]
@@ -387,23 +389,36 @@ extension DeskflowEngine {
     func applyRemoteTopologySync(_ payload: WireTopologySyncPayload) {
         var addedRemote = false
         for entry in payload.items {
+            // When two Macs sync topology, map sender's local `mac_disp_*` to our remote `peer_mac_disp_*`
+            let resolvedId: String
+            if payload.senderOs == "macOS" {
+                if entry.id.hasPrefix("peer_") {
+                    let stripped = String(entry.id.dropFirst(5))
+                    resolvedId = displayNodes.contains(where: { $0.id == stripped && !$0.isRemote }) ? stripped : entry.id
+                } else {
+                    resolvedId = displayNodes.contains(where: { $0.id == "peer_\(entry.id)" }) ? "peer_\(entry.id)" : entry.id
+                }
+            } else {
+                resolvedId = entry.id
+            }
+
             let pt = CGPoint(x: entry.canvasX, y: entry.canvasY)
-            syncedRemotePositions[entry.id] = pt
-            if let idx = displayNodes.firstIndex(where: { $0.id == entry.id }) {
+            syncedRemotePositions[resolvedId] = pt
+            if let idx = displayNodes.firstIndex(where: { $0.id == resolvedId }) {
                 displayNodes[idx].canvasX = pt.x
                 displayNodes[idx].canvasY = pt.y
-            } else if entry.osKind == "Windows",
+            } else if entry.osKind == "Windows" || (payload.senderOs == "macOS" && entry.osKind == "macOS"),
                       let name = entry.name,
                       let w = entry.widthPx,
                       let h = entry.heightPx {
                 let dIdx = max(1, entry.displayIndex ?? 1)
-                if !remotePeerMonitors.contains(where: { $0.id == entry.id }) {
+                if !remotePeerMonitors.contains(where: { $0.id == entry.id || $0.id == resolvedId }) {
                     remotePeerMonitors.append(
                         WireMonitorDto(
                             id: entry.id,
                             displayIndex: dIdx,
                             name: name,
-                            osKind: "Windows",
+                            osKind: entry.osKind ?? payload.senderOs,
                             widthPx: w,
                             heightPx: h,
                             scaleFactor: entry.scaleFactor ?? 1.0,

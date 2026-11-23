@@ -253,10 +253,11 @@ final class MacKvmController {
                    let frame = WireFrameCodec.encodeJSON(
                     type: .kvmFocusSwitch,
                     value: WireKvmFocusPayload(
-                        targetOs: "Windows",
+                        targetOs: engine.peerIsMac ? "macOS" : "Windows",
                         monitorIndex: activeTargetWinMonitorIdx,
                         normX: virtualNormX,
-                        normY: virtualNormY
+                        normY: virtualNormY,
+                        action: "enter"
                     )
                    ) {
                     DeskflowTransport.shared.sendControlFrame(frame)
@@ -297,7 +298,8 @@ final class MacKvmController {
                         targetOs: "macOS",
                         monitorIndex: sourceMacMonitorIdx,
                         normX: virtualNormX,
-                        normY: virtualNormY
+                        normY: virtualNormY,
+                        action: "leave"
                     )
                    ) {
                     DeskflowTransport.shared.sendControlFrame(frame)
@@ -469,8 +471,8 @@ final class MacKvmController {
             if abs(dx) > 450 || abs(dy) > 450 {
                 return nil
             }
-            let targetWin = engine.displayNodes.first(where: { $0.osKind == .windows && $0.displayIndex == activeTargetWinMonitorIdx })
-                ?? engine.displayNodes.first(where: { $0.osKind == .windows })
+            let targetWin = engine.displayNodes.first(where: { $0.isRemote && $0.displayIndex == activeTargetWinMonitorIdx })
+                ?? engine.displayNodes.first(where: { $0.isRemote })
             let refW = targetWin.map { max(1280.0, Double($0.widthPx) / max(1.0, $0.scaleFactor)) } ?? 1920.0
             let refH = targetWin.map { max(720.0, Double($0.heightPx) / max(1.0, $0.scaleFactor)) } ?? 1080.0
             virtualNormX += dx / refW
@@ -711,8 +713,8 @@ final class MacKvmController {
         dy: Double,
         engine: DeskflowEngine
     ) -> (macMonitorIdx: Int, returnEdge: ScreenEdgeSide, normX: Double, normY: Double)? {
-        let macNodes = engine.displayNodes.filter { $0.osKind == .mac }
-        let winNodes = engine.displayNodes.filter { $0.osKind == .windows }
+        let macNodes = engine.displayNodes.filter { !$0.isRemote }
+        let winNodes = engine.displayNodes.filter { $0.isRemote }
         guard !macNodes.isEmpty else { return nil }
 
         let activeWin = winNodes.first(where: { $0.displayIndex == activeTargetWinMonitorIdx }) ?? winNodes.first
@@ -771,7 +773,7 @@ final class MacKvmController {
         engine: DeskflowEngine,
         edgeTolerance: CGFloat = 5.0
     ) -> (macMonitorIdx: Int, winMonitorIdx: Int, entryX: Double, entryY: Double, returnEdge: ScreenEdgeSide)? {
-        let winNodes = engine.displayNodes.filter { $0.osKind == .windows }
+        let winNodes = engine.displayNodes.filter { $0.isRemote }
         guard !winNodes.isEmpty else { return nil }
 
         let screens = NSScreen.screens
@@ -800,8 +802,8 @@ final class MacKvmController {
 
         guard atRight || atLeft || atTop || atBottom else { return nil }
 
-        let macNode = engine.displayNodes.first(where: { $0.osKind == .mac && $0.displayIndex == macIdx })
-            ?? engine.displayNodes.first(where: { $0.osKind == .mac })
+        let macNode = engine.displayNodes.first(where: { !$0.isRemote && $0.displayIndex == macIdx })
+            ?? engine.displayNodes.first(where: { !$0.isRemote })
 
         guard let mRect = macNode?.rect else { return nil }
 
@@ -809,7 +811,7 @@ final class MacKvmController {
         let canvasY = mRect.minY + CGFloat(normY) * mRect.height
 
         let otherMacRects = engine.displayNodes
-            .filter { $0.osKind == .mac && $0.id != macNode?.id }
+            .filter { !$0.isRemote && $0.id != macNode?.id }
             .map(\.rect)
 
         if atRight {
@@ -894,6 +896,8 @@ final class MacKvmController {
     }
 
     private func matchSemanticHotkey(keyCode: UInt16, flags: CGEventFlags, engine: DeskflowEngine) -> String? {
+        // When controlling another Mac, pass native Cmd+<Key> directly instead of translating into Windows shortcuts.
+        if engine.peerIsMac { return nil }
         // Deskflow default passthrough (Command -> Win) unless the user specifically enabled an override rule below.
         let rules = engine.hotkeyRules
         let hasCmd = flags.contains(.maskCommand)
@@ -944,13 +948,24 @@ final class MacKvmController {
     }
 
     func injectMouseButton(button: UInt8, isDown: Bool) {
-        let loc = NSEvent.mouseLocation
-        let mainH = NSScreen.screens.first?.frame.height ?? 1080
-        let pt = CGPoint(x: loc.x, y: mainH - loc.y)
-        let type: CGEventType = (button == 2)
-            ? (isDown ? .rightMouseDown : .rightMouseUp)
-            : (isDown ? .leftMouseDown : .leftMouseUp)
-        let cgBtn: CGMouseButton = (button == 2) ? .right : .left
+        let fallbackPt: CGPoint = {
+            let loc = NSEvent.mouseLocation
+            let mainH = NSScreen.screens.first?.frame.height ?? 1080
+            return CGPoint(x: loc.x, y: mainH - loc.y)
+        }()
+        let pt = RemoteCursorInjector.shared.updateInjectedMouseButton(button: button, isDown: isDown) ?? fallbackPt
+        let type: CGEventType
+        let cgBtn: CGMouseButton
+        if button == 2 {
+            type = isDown ? .rightMouseDown : .rightMouseUp
+            cgBtn = .right
+        } else if button == 3 {
+            type = isDown ? .otherMouseDown : .otherMouseUp
+            cgBtn = .center
+        } else {
+            type = isDown ? .leftMouseDown : .leftMouseUp
+            cgBtn = .left
+        }
         if let ev = CGEvent(mouseEventSource: RemoteCursorInjector.shared.sharedEventSource(), mouseType: type, mouseCursorPosition: pt, mouseButton: cgBtn) {
             ev.setIntegerValueField(.eventSourceUserData, value: MacKvmController.injectedEventTag)
             ev.post(tap: .cghidEventTap)
@@ -965,13 +980,16 @@ final class MacKvmController {
     }
 
     func injectKeyEvent(vkCode: UInt16, isDown: Bool, modifiers: UInt32) {
-        let macKc = windowsVKToMacKeyCode(vkCode)
-        guard let ev = CGEvent(keyboardEventSource: nil, virtualKey: macKc, keyDown: isDown) else { return }
+        guard let macKc = windowsVKToMacKeyCode(vkCode) else { return }
         var cgFlags: CGEventFlags = []
         if (modifiers & 1) != 0 { cgFlags.insert(.maskShift) }
         if (modifiers & 2) != 0 { cgFlags.insert(.maskControl) }
         if (modifiers & 4) != 0 { cgFlags.insert(.maskAlternate) }
         if (modifiers & 8) != 0 { cgFlags.insert(.maskCommand) }
+        guard let ev = CGEvent(keyboardEventSource: nil, virtualKey: macKc, keyDown: isDown) else { return }
+        if Self.modifierKeyCodes.contains(macKc) {
+            ev.type = .flagsChanged
+        }
         ev.flags = cgFlags
         ev.setIntegerValueField(.eventSourceUserData, value: MacKvmController.injectedEventTag)
         ev.post(tap: .cghidEventTap)
@@ -1029,22 +1047,27 @@ final class MacKvmController {
         122: 0x70, 120: 0x71, 99: 0x72, 118: 0x73, 96: 0x74, 97: 0x75, 98: 0x76, 100: 0x77, 101: 0x78, 109: 0x79, 103: 0x7A, 111: 0x7B
     ]
 
-    private static let winToMacKeyMap: [UInt16: CGKeyCode] = [
-        0x41: 0, 0x42: 11, 0x43: 8, 0x44: 2, 0x45: 14, 0x46: 3, 0x47: 5, 0x48: 4,
-        0x49: 34, 0x4A: 38, 0x4B: 40, 0x4C: 37, 0x4D: 46, 0x4E: 45, 0x4F: 31, 0x50: 35,
-        0x51: 12, 0x52: 15, 0x53: 1, 0x54: 17, 0x55: 32, 0x56: 9, 0x57: 13, 0x58: 7,
-        0x59: 16, 0x5A: 6,
-        0x30: 29, 0x31: 18, 0x32: 19, 0x33: 20, 0x34: 21, 0x35: 23, 0x36: 22, 0x37: 26, 0x38: 28, 0x39: 25,
-        0x0D: 36, 0x09: 48, 0x20: 49, 0x08: 51, 0x1B: 53, 0x2E: 117,
-        0x25: 123, 0x27: 124, 0x28: 125, 0x26: 126,
-        0x5B: 55
-    ]
+    private static let modifierKeyCodes: Set<CGKeyCode> = [54, 55, 56, 57, 58, 59, 60, 61, 62]
+
+    private static let winToMacKeyMap: [UInt16: CGKeyCode] = {
+        var inv: [UInt16: CGKeyCode] = [:]
+        for (macKc, winVk) in macToWinKeyMap {
+            inv[winVk] = CGKeyCode(macKc)
+        }
+        inv[0x10] = 56 // Shift
+        inv[0x11] = 59 // Control
+        inv[0x12] = 58 // Option / Alt
+        inv[0x14] = 57 // Caps Lock
+        inv[0x5B] = 55 // Left Command / Win
+        inv[0x5C] = 54 // Right Command / Win
+        return inv
+    }()
 
     private func macKeyCodeToWindowsVK(_ kc: UInt16) -> UInt16 {
         Self.macToWinKeyMap[kc] ?? 0
     }
 
-    private func windowsVKToMacKeyCode(_ vk: UInt16) -> CGKeyCode {
-        Self.winToMacKeyMap[vk] ?? 49
+    private func windowsVKToMacKeyCode(_ vk: UInt16) -> CGKeyCode? {
+        Self.winToMacKeyMap[vk]
     }
 }

@@ -100,6 +100,15 @@ final class DeskflowEngine: ObservableObject {
 
     var lastReceivedURL: URL?
     var remotePeerMonitors: [WireMonitorDto] = []
+    @Published var peerHostOs: String = "Windows"
+
+    var peerIsMac: Bool {
+        peerHostOs.lowercased().contains("mac")
+    }
+
+    var peerShortDisplayOs: String {
+        peerIsMac ? "macOS" : "Windows"
+    }
 
     // MARK: - 2. Multi-NIC Online, Latency/Bandwidth Split & Concurrency
 
@@ -395,6 +404,7 @@ final class DeskflowEngine: ObservableObject {
                     }
                     if !self.remotePeerMonitors.isEmpty {
                         self.remotePeerMonitors.removeAll()
+                        self.peerHostOs = "Windows"
                         self.refreshIndependentDisplays()
                     }
                 }
@@ -407,18 +417,19 @@ final class DeskflowEngine: ObservableObject {
             }
         }
 
-        tx.onPeerMonitorsUpdated = { [weak self] monitors, host in
+        tx.onPeerMonitorsUpdated = { [weak self] monitors, host, os in
             Task { @MainActor in
                 guard let self = self else { return }
                 self.remotePeerMonitors = monitors
                 self.peerHostLabel = host
+                self.peerHostOs = os.isEmpty ? "Windows" : os
                 self.syncedRemotePositions.removeValue(forKey: "win_disp_wait")
-                // Restore authoritative user-saved display coordinates before laying out combined Mac+Win screens
+                // Restore authoritative user-saved display coordinates before laying out combined screen arrangement
                 for (id, coords) in self.savedDisplayPositions where coords.count == 2 {
                     self.syncedRemotePositions[id] = CGPoint(x: coords[0], y: coords[1])
                 }
                 self.refreshIndependentDisplays()
-                self.appendLog("[Display] 已同步对端 Windows (\(host)) 的 \(monitors.count) 块独立显示器")
+                self.appendLog("[Display] 已同步对端 \(self.peerShortDisplayOs) (\(host)) 的 \(monitors.count) 块独立显示器")
             }
         }
 
@@ -648,12 +659,14 @@ final class DeskflowEngine: ObservableObject {
             let trace = KvmStageTracer.shared.currentTrace()
             let recvNs = trace.t0Ns > 0 ? trace.t0Ns : DispatchTime.now().uptimeNanoseconds
             let stageSeq = trace.seq
+            let isMacPeerNow = DeskflowTransport.shared.peerHostOs.lowercased().contains("mac")
+            let incomingToLocalPre = isMacPeerNow ? (sw.action != "leave") : (sw.targetOs == "macOS")
             let epochAtSwitch: UInt64
-            if sw.targetOs == "macOS" {
+            if incomingToLocalPre {
                 KvmStageTracer.shared.log(
                     seq: stageSeq,
                     t0Ns: recvNs,
-                    "engineFocusCallback target=macOS"
+                    "engineFocusCallback target=\(sw.targetOs) action=\(sw.action ?? "nil")"
                 )
                 epochAtSwitch = MacKvmController.prepareCursorForIncomingFocus(
                     monitorIdx: sw.monitorIndex,
@@ -667,18 +680,19 @@ final class DeskflowEngine: ObservableObject {
             }
             Task { @MainActor in
                 guard let self = self else {
-                    if sw.targetOs == "macOS" {
+                    if incomingToLocalPre {
                         KvmStageTracer.shared.log(seq: stageSeq, t0Ns: recvNs, "mainActorSkipped_selfNil")
                     }
                     return
                 }
-                if sw.targetOs == "macOS" {
+                let incomingToLocal = self.peerIsMac ? (sw.action != "leave") : (sw.targetOs == "macOS")
+                if incomingToLocal {
                     KvmStageTracer.shared.log(
                         seq: stageSeq,
                         t0Ns: recvNs,
-                        "mainActorEnter mode=\(self.kvmControlMode.rawValue) remoteFocusOnWin=\(self.remoteFocusOnWindows) kvmEnabled=\(self.kvmEnabled)"
+                        "mainActorEnter mode=\(self.kvmControlMode.rawValue) remoteFocusOnWin=\(self.remoteFocusOnWindows) kvmEnabled=\(self.kvmEnabled) peerIsMac=\(self.peerIsMac)"
                     )
-                    // Incoming remote control from Windows -> allow only when dualActive or winMasterOnly
+                    // Incoming remote control -> allow only when dualActive or winMasterOnly
                     if self.kvmControlMode == .macMasterOnly && !self.remoteFocusOnWindows {
                         KvmStageTracer.shared.log(seq: stageSeq, t0Ns: recvNs, "mainActorGuardReturnedEarly mode=macMasterOnly")
                         return
@@ -695,7 +709,14 @@ final class DeskflowEngine: ObservableObject {
                         t0Ns: recvNs,
                         "mainActorDone remoteFocusOnWin=\(self.remoteFocusOnWindows)"
                     )
-                } else if sw.targetOs == "Windows" {
+                } else if self.peerIsMac && sw.action == "leave" {
+                    // Controlling peer Mac pulled focus back to itself (e.g. Esc / Ctrl+Opt+S)
+                    if self.remoteFocusOnWindows {
+                        MacKvmController.shared.setRemoteFocus(false, notifyPeer: false)
+                    } else {
+                        MacKvmController.shared.syncInjectorState(kvmEnabled: self.kvmEnabled, controlMode: self.kvmControlMode)
+                    }
+                } else if !self.peerIsMac && sw.targetOs == "Windows" {
                     MacKvmController.shared.setRemoteFocus(true, entryNormX: sw.normX, entryNormY: sw.normY, notifyPeer: false)
                 }
             }

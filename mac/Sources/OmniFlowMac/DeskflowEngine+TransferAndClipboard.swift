@@ -40,7 +40,7 @@ extension DeskflowEngine {
         guard !urls.isEmpty else { return }
         let links = DeskflowTransport.shared.activeLinksSnapshot()
         let estBps = estimatedThroughputBytesPerSec()
-        let targetName = peerHostLabel.isEmpty ? "Windows" : peerHostLabel
+        let targetName = peerHostLabel.isEmpty ? peerShortDisplayOs : peerHostLabel
         let thresholdSec = DragHandoffPolicy.defaultContinuousMaxSeconds
         let en = isEnglish
         let title = urls.count > 1

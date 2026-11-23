@@ -208,7 +208,7 @@ struct SpatialMonitorTileView: View {
             VStack(spacing: 3) {
                 Spacer()
                 HStack(spacing: 4) {
-                    Text(isMac ? "macOS" : "Windows")
+                    Text(isMac ? (node.isRemote ? "macOS · Peer" : "macOS") : "Windows")
                         .font(.system(size: 9, weight: .bold))
                         .padding(.horizontal, 5)
                         .padding(.vertical, 1.5)
@@ -338,7 +338,9 @@ struct InputAndShortcutsPageView: View {
                             .font(.system(size: 14, weight: .semibold))
                             .foregroundColor(.white)
                         Spacer()
-                        Button(engine.remoteFocusOnWindows ? engine.t("切回 Mac", "Return to Mac") : engine.t("切到 Windows 控制", "Switch to Windows")) {
+                        Button(engine.remoteFocusOnWindows
+                               ? engine.t("切回本机 Mac", "Return to This Mac")
+                               : engine.t("切到 \(engine.peerIsMac ? "对端 Mac" : "Windows") 控制", "Switch to \(engine.peerShortDisplayOs)")) {
                             engine.toggleManualFocusSwitch()
                         }
                         .buttonStyle(OmniPrimaryButtonStyle())

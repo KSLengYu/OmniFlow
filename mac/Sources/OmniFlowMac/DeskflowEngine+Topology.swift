@@ -54,8 +54,12 @@ extension DeskflowEngine {
 
 
     func refreshIndependentDisplays() {
-        let oldPositions = Dictionary(uniqueKeysWithValues: displayNodes.map { ($0.id, CGPoint(x: $0.canvasX, y: $0.canvasY)) })
+        let oldPositions = Dictionary(
+            displayNodes.map { ($0.id, CGPoint(x: $0.canvasX, y: $0.canvasY)) },
+            uniquingKeysWith: { first, _ in first }
+        )
         var nodes: [IndependentDisplayNode] = []
+        var usedIds = Set<String>()
         let screens = NSScreen.screens
 
         // Build Mac display tiles strictly matching macOS System Settings logical bounds & proportions
@@ -76,6 +80,7 @@ extension DeskflowEngine {
 
         for entry in macEntries {
             let id = "mac_disp_\(entry.idx)"
+            usedIds.insert(id)
             var node = IndependentDisplayNode(
                 id: id,
                 displayIndex: entry.idx,
@@ -102,16 +107,31 @@ extension DeskflowEngine {
         }
         MacKvmController.shared.syncInjectorState(kvmEnabled: kvmEnabled, controlMode: kvmControlMode)
 
-        // Only render remote Windows displays AFTER peer actually connects & sends real monitor list!
+        // Only render remote peer displays AFTER peer actually connects & sends real monitor list!
         if !remotePeerMonitors.isEmpty {
             let macMaxRight = nodes.map { $0.canvasX + $0.aspectWidth }.max() ?? (originX + 180)
             let primaryMacY = nodes.first(where: { $0.isPrimary })?.canvasY ?? nodes.first?.canvasY ?? originY
             let minWinX = remotePeerMonitors.map { Double($0.boundsX) }.min() ?? 0.0
             let minWinY = remotePeerMonitors.map { Double($0.boundsY) }.min() ?? 0.0
 
-            for rm in remotePeerMonitors {
+            for (rmIdx, rm) in remotePeerMonitors.enumerated() {
+                var nodeId = rm.id.trimmingCharacters(in: .whitespacesAndNewlines)
+                if nodeId.isEmpty {
+                    nodeId = "peer_disp_\(max(1, rm.displayIndex))_\(rmIdx)"
+                }
+                if usedIds.contains(nodeId) {
+                    var suffix = 1
+                    var candidate = "peer_\(nodeId)"
+                    while usedIds.contains(candidate) {
+                        suffix += 1
+                        candidate = "peer_\(nodeId)_\(suffix)"
+                    }
+                    nodeId = candidate
+                }
+                usedIds.insert(nodeId)
+
                 var node = IndependentDisplayNode(
-                    id: rm.id,
+                    id: nodeId,
                     displayIndex: max(0, rm.displayIndex - 1),
                     name: rm.name,
                     osKind: .windows,
@@ -124,10 +144,10 @@ extension DeskflowEngine {
                     canvasX: macMaxRight + CGFloat(((Double(rm.boundsX) - minWinX) * layoutScale).rounded()),
                     canvasY: primaryMacY + CGFloat(((Double(rm.boundsY) - minWinY) * layoutScale).rounded())
                 )
-                if let synced = syncedRemotePositions[rm.id] {
+                if let synced = syncedRemotePositions[nodeId] ?? syncedRemotePositions[rm.id] {
                     node.canvasX = synced.x
                     node.canvasY = synced.y
-                } else if let saved = oldPositions[rm.id] {
+                } else if let saved = oldPositions[nodeId] ?? oldPositions[rm.id] {
                     node.canvasX = saved.x
                     node.canvasY = saved.y
                 }

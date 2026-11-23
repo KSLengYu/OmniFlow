@@ -16,9 +16,15 @@ public sealed partial class DeskflowService
 
     public void ResetMonitorLayout(bool preservePositions = true)
     {
-        var savedPos = preservePositions
-            ? Monitors.ToDictionary(m => m.Id, m => (X: m.CanvasX, Y: m.CanvasY))
-            : new Dictionary<string, (double X, double Y)>();
+        var savedPos = new Dictionary<string, (double X, double Y)>(StringComparer.OrdinalIgnoreCase);
+        if (preservePositions)
+        {
+            foreach (var m in Monitors)
+            {
+                if (!string.IsNullOrEmpty(m.Id))
+                    savedPos.TryAdd(m.Id, (m.CanvasX, m.CanvasY));
+            }
+        }
 
         if (!preservePositions)
         {
@@ -28,6 +34,7 @@ public sealed partial class DeskflowService
 
         _localMonitors = DeskflowTransport.EnumerateRealWindowsMonitors();
         var list = new List<IndependentMonitorItem>();
+        var usedIds = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         const double originX = 100.0;
         const double originY = 100.0;
         const double layoutScale = 0.068;
@@ -37,11 +44,22 @@ public sealed partial class DeskflowService
             double minMacX = _peerMonitors.Min(m => (double)m.BoundsX);
             double minMacY = _peerMonitors.Min(m => (double)m.BoundsY);
 
+            int pmIdx = 0;
             foreach (var pm in _peerMonitors)
             {
+                string pmId = string.IsNullOrWhiteSpace(pm.Id) ? $"peer_disp_{Math.Max(1, pm.DisplayIndex)}_{pmIdx}" : pm.Id.Trim();
+                if (!usedIds.Add(pmId))
+                {
+                    int suffix = 2;
+                    string cand = $"peer_{pmId}";
+                    while (!usedIds.Add(cand))
+                        cand = $"peer_{pmId}_{suffix++}";
+                    pmId = cand;
+                }
+                pmIdx++;
                 var node = new IndependentMonitorItem
                 {
-                    Id = pm.Id,
+                    Id = pmId,
                     DisplayIndex = pm.DisplayIndex,
                     Name = pm.Name,
                     OsKind = "macOS",
@@ -55,12 +73,12 @@ public sealed partial class DeskflowService
                     CanvasY = originY + Math.Round((pm.BoundsY - minMacY) * layoutScale)
                 };
 
-                if (_syncedPositions.TryGetValue(pm.Id, out var synced))
+                if (_syncedPositions.TryGetValue(pmId, out var synced) || _syncedPositions.TryGetValue(pm.Id, out synced))
                 {
                     node.CanvasX = synced.X;
                     node.CanvasY = synced.Y;
                 }
-                else if (savedPos.TryGetValue(pm.Id, out var pos))
+                else if (savedPos.TryGetValue(pmId, out var pos) || savedPos.TryGetValue(pm.Id, out pos))
                 {
                     node.CanvasX = pos.X;
                     node.CanvasY = pos.Y;
@@ -77,11 +95,22 @@ public sealed partial class DeskflowService
             double minWinX = _localMonitors.Min(m => (double)m.BoundsX);
             double minWinY = _localMonitors.Min(m => (double)m.BoundsY);
 
+            int lmIdx = 0;
             foreach (var lm in _localMonitors)
             {
+                string lmId = string.IsNullOrWhiteSpace(lm.Id) ? $"win_disp_{Math.Max(1, lm.DisplayIndex)}_{lmIdx}" : lm.Id.Trim();
+                if (!usedIds.Add(lmId))
+                {
+                    int suffix = 2;
+                    string cand = $"local_{lmId}";
+                    while (!usedIds.Add(cand))
+                        cand = $"local_{lmId}_{suffix++}";
+                    lmId = cand;
+                }
+                lmIdx++;
                 var node = new IndependentMonitorItem
                 {
-                    Id = lm.Id,
+                    Id = lmId,
                     DisplayIndex = lm.DisplayIndex,
                     Name = lm.Name,
                     OsKind = "Windows",
@@ -94,12 +123,12 @@ public sealed partial class DeskflowService
                     CanvasX = winBaseX + Math.Round((lm.BoundsX - minWinX) * layoutScale),
                     CanvasY = winBaseY + Math.Round((lm.BoundsY - minWinY) * layoutScale)
                 };
-                if (_syncedPositions.TryGetValue(lm.Id, out var synced))
+                if (_syncedPositions.TryGetValue(lmId, out var synced) || _syncedPositions.TryGetValue(lm.Id, out synced))
                 {
                     node.CanvasX = synced.X;
                     node.CanvasY = synced.Y;
                 }
-                else if (savedPos.TryGetValue(lm.Id, out var pos))
+                else if (savedPos.TryGetValue(lmId, out var pos) || savedPos.TryGetValue(lm.Id, out pos))
                 {
                     node.CanvasX = pos.X;
                     node.CanvasY = pos.Y;

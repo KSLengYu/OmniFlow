@@ -110,6 +110,17 @@ final class DeskflowEngine: ObservableObject {
         peerIsMac ? "macOS" : "Windows"
     }
 
+    var activeControlHostLabel: String {
+        if !remoteFocusOnWindows {
+            return t("本机 Mac", "This Mac")
+        }
+        let cleanedHost = peerHostLabel
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .replacingOccurrences(of: ".local", with: "", options: [.caseInsensitive, .anchored, .backwards])
+        let base = peerIsMac ? t("对方 Mac", "Peer Mac") : "Windows"
+        return cleanedHost.isEmpty ? base : "\(base) · \(cleanedHost)"
+    }
+
     // MARK: - 2. Multi-NIC Online, Latency/Bandwidth Split & Concurrency
 
     @Published var nicChannels: [NicChannelItem] = []

@@ -92,6 +92,7 @@ struct ArrangeDisplaysPageView: View {
                         SpatialMonitorTileView(
                             node: node,
                             isSelected: engine.selectedDisplayId == node.id,
+                            isEnglish: engine.isEnglish,
                             onSelect: {
                                 engine.selectedDisplayId = node.id
                             },
@@ -159,6 +160,7 @@ struct ArrangeDisplaysPageView: View {
 struct SpatialMonitorTileView: View {
     let node: IndependentDisplayNode
     let isSelected: Bool
+    let isEnglish: Bool
     let onSelect: () -> Void
     let onDragMove: (CGFloat, CGFloat) -> Void
     let onDragEnd: () -> Void
@@ -208,7 +210,7 @@ struct SpatialMonitorTileView: View {
             VStack(spacing: 3) {
                 Spacer()
                 HStack(spacing: 4) {
-                    Text(isMac ? (node.isRemote ? "macOS · Peer" : "macOS") : "Windows")
+                    Text(isMac ? tr(isEnglish, node.isRemote ? "对方 Mac" : "本机 Mac", node.isRemote ? "Peer Mac" : "This Mac") : "Windows")
                         .font(.system(size: 9, weight: .bold))
                         .padding(.horizontal, 5)
                         .padding(.vertical, 1.5)
